@@ -632,6 +632,30 @@ st.markdown(
         color: #0f172a !important;
         -webkit-text-fill-color: #0f172a !important;
     }
+
+    [data-testid="stSidebar"] .stButton > button,
+    [data-testid="stSidebar"] .stDownloadButton > button {
+        background: linear-gradient(180deg, #315efb 0%, #1d4ed8 100%) !important;
+        color: #ffffff !important;
+        border: 1px solid #2b57f1 !important;
+        border-radius: 14px !important;
+        font-weight: 800 !important;
+        box-shadow: 0 8px 18px rgba(49, 94, 251, 0.28) !important;
+    }
+    [data-testid="stSidebar"] .stButton > button:hover,
+    [data-testid="stSidebar"] .stDownloadButton > button:hover {
+        background: linear-gradient(180deg, #3b6bff 0%, #2457ef 100%) !important;
+        color: #ffffff !important;
+        border-color: #3b6bff !important;
+    }
+    [data-testid="stSidebar"] .stButton > button:disabled,
+    [data-testid="stSidebar"] .stDownloadButton > button:disabled {
+        background: #334155 !important;
+        color: #e2e8f0 !important;
+        border: 1px solid #475569 !important;
+        opacity: 1 !important;
+        box-shadow: none !important;
+    }
     .topbar { background: linear-gradient(90deg, #0f172a 0%, #1d4ed8 100%); color: white; padding: 16px 18px; border-radius: 18px; margin-top: 0.4rem; margin-bottom: 10px; box-shadow: 0 12px 28px rgba(15, 23, 42, .18); }
     .topbar-grid { display:grid; grid-template-columns: 1.6fr 1fr 1fr 1fr; gap: 10px; align-items:center; }
     .brand-box { display:flex; gap:12px; align-items:center; }
