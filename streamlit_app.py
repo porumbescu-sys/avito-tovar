@@ -103,6 +103,20 @@ def tokenize_text(value: object) -> list[str]:
     return [t for t in re.split(r"[^A-Za-zА-Яа-я0-9]+", text.upper()) if t]
 
 
+
+
+def unique_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        key = normalize_text(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
 def find_column(columns: list[str], candidates: list[str]) -> Optional[str]:
     lower_map = {str(col).strip().lower(): col for col in columns}
     for candidate in candidates:
