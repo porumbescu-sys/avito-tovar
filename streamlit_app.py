@@ -601,6 +601,27 @@ st.markdown(
         border: 1px dashed rgba(255,255,255,0.25) !important;
         border-radius: 14px !important;
     }
+    [data-testid="stSidebar"] .stFileUploader button,
+    [data-testid="stSidebar"] .stFileUploader button[kind],
+    [data-testid="stSidebar"] .stFileUploader [data-testid="stFileUploaderDropzone"] button,
+    [data-testid="stSidebar"] .stFileUploader [data-testid="baseButton-secondary"],
+    [data-testid="stSidebar"] .stFileUploader [data-baseweb="button"] {
+        background: linear-gradient(180deg, #315efb 0%, #1d4ed8 100%) !important;
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        border: 1px solid #2b57f1 !important;
+        border-radius: 12px !important;
+        font-weight: 800 !important;
+        opacity: 1 !important;
+        box-shadow: 0 8px 18px rgba(49, 94, 251, 0.28) !important;
+    }
+    [data-testid="stSidebar"] .stFileUploader small,
+    [data-testid="stSidebar"] .stFileUploader span,
+    [data-testid="stSidebar"] .stFileUploader label {
+        color: #e5ecff !important;
+        -webkit-text-fill-color: #e5ecff !important;
+        opacity: 1 !important;
+    }
     [data-testid="stSidebar"] .stNumberInput input,
     [data-testid="stSidebar"] .stTextInput input,
     [data-testid="stSidebar"] .stTextArea textarea,
@@ -611,6 +632,18 @@ st.markdown(
         color: #0f172a !important;
         -webkit-text-fill-color: #0f172a !important;
         caret-color: #0f172a !important;
+        opacity: 1 !important;
+    }
+    [data-testid="stSidebar"] .stNumberInput button,
+    [data-testid="stSidebar"] .stNumberInput [data-baseweb="button"],
+    [data-testid="stSidebar"] .stNumberInput button svg,
+    [data-testid="stSidebar"] .stNumberInput [data-baseweb="button"] svg {
+        background: #1e40af !important;
+        color: #ffffff !important;
+        fill: #ffffff !important;
+        stroke: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        border-color: #1d4ed8 !important;
         opacity: 1 !important;
     }
     [data-testid="stSidebar"] .stTextArea textarea::placeholder,
@@ -650,8 +683,8 @@ st.markdown(
     }
     [data-testid="stSidebar"] .stButton > button:disabled,
     [data-testid="stSidebar"] .stDownloadButton > button:disabled {
-        background: #334155 !important;
-        color: #e2e8f0 !important;
+        background: #1e293b !important;
+        color: #ffffff !important;
         border: 1px solid #475569 !important;
         opacity: 1 !important;
         box-shadow: none !important;
