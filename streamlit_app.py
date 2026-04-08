@@ -463,7 +463,7 @@ def build_offer_template(df: pd.DataFrame, query: str, round100: bool, footer_te
     if lines and hashtag_parts:
         lines.append(",".join(hashtag_parts))
 
-PLACEHOLDER
+    return "\n\n".join(lines)
 
 
 def build_selected_price_template(df: pd.DataFrame, query: str, price_mode: str, round100: bool, custom_discount: float, search_mode: str) -> str:
