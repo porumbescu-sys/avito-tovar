@@ -938,8 +938,9 @@ elif not submitted_query.strip():
     st.info("Введите артикулы, затем нажмите **Найти**.")
 else:
     template_text = build_offer_template(current_df, submitted_query, round100, st.session_state.template1_footer, search_mode)
+    st.session_state["offer_template_text"] = template_text
     line_count = len([x for x in template_text.split("\n\n") if x.strip()]) if template_text.strip() else 0
-    st.text_area("Готовый шаблон", value=template_text, height=min(500, max(180, 72 + line_count * 40)), key="offer_template_text")
+    st.text_area("Готовый шаблон", height=min(500, max(180, 72 + line_count * 40)), key="offer_template_text")
     if template_text.strip():
         render_copy_big_button(template_text, "📋 Скопировать шаблон 1")
 
@@ -954,7 +955,8 @@ elif not submitted_query.strip():
     st.info("Введите артикулы, затем нажмите **Найти**.")
 else:
     second_template_text = build_selected_price_template(current_df, submitted_query, price_mode, round100, custom_discount, search_mode)
-    st.text_area("Готовый шаблон 2", value=second_template_text, height=min(360, max(150, 52 + max(1, second_template_text.count('\n\n') + 1) * 42)), key="selected_price_template_text")
+    st.session_state["selected_price_template_text"] = second_template_text
+    st.text_area("Готовый шаблон 2", height=min(360, max(150, 52 + max(1, second_template_text.count('\n\n') + 1) * 42)), key="selected_price_template_text")
     if second_template_text.strip():
         render_copy_big_button(second_template_text, "📋 Скопировать шаблон 2")
     else:
