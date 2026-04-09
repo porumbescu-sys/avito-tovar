@@ -61,6 +61,21 @@ COLOR_KEYWORDS = [
     ("зел", "зеленый"),
 ]
 
+LINKED_SEARCH_NEGATIVE_MARKERS = [
+    "УЦЕН",
+    "СОВМЕСТ",
+    "СОВМ",
+    "COMPAT",
+    "COMPATIBLE",
+    "CACTUS",
+    "КОНТРАКТ",
+    "REFURB",
+    "REMAN",
+    "ВОССТАНОВ",
+]
+
+ARTICLE_PIECE_RE = re.compile(r"^[A-Za-zА-Яа-я0-9._-]{3,}$")
+
 
 def init_state() -> None:
     defaults = {
@@ -76,6 +91,7 @@ def init_state() -> None:
         "template1_footer": DEFAULT_TEMPLATE1_FOOTER,
         "price_patch_input": "",
         "patch_message": "",
+        "series_mode": "Только оригиналы",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -103,6 +119,30 @@ def tokenize_text(value: object) -> list[str]:
     return [t for t in re.split(r"[^A-Za-zА-Яа-я0-9]+", text.upper()) if t]
 
 
+def is_candidate_article_norm(norm: str) -> bool:
+    if not norm:
+        return False
+    if norm.isdigit():
+        return len(norm) >= 4
+    return len(norm) >= 3 and any(ch.isdigit() for ch in norm) and any(ch.isalpha() for ch in norm)
+
+
+def extract_article_candidates_from_text(text: object) -> list[str]:
+    raw = str(text or "").upper()
+    prepared = re.sub(r"[|/\,;:()\[\]{}]+", " ", raw)
+    prepared = prepared.replace("№", " ")
+    chunks = re.findall(r"[A-ZА-Я0-9._-]{3,}", prepared)
+    result: list[str] = []
+    for chunk in chunks:
+        norm = normalize_article(chunk)
+        if is_candidate_article_norm(norm):
+            result.append(norm)
+    return unique_preserve_order(result)
+
+
+def row_has_negative_link_markers(row: pd.Series) -> bool:
+    text = f"{row.get('article', '')} {row.get('name', '')} {row.get('brand', '')}".upper()
+    return any(marker in text for marker in LINKED_SEARCH_NEGATIVE_MARKERS)
 
 
 def unique_preserve_order(items: list[str]) -> list[str]:
@@ -180,6 +220,7 @@ def load_price_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     data["price_12"] = data["sale_price"] * (1 - DEFAULT_DISCOUNT_1 / 100)
     data["price_20"] = data["sale_price"] * (1 - DEFAULT_DISCOUNT_2 / 100)
     data["name_tokens"] = data["name"].map(tokenize_text)
+    data["name_code_list"] = data["name"].map(extract_article_candidates_from_text)
     data["search_blob"] = (
         data["article_norm"].fillna("")
         + " "
@@ -287,6 +328,59 @@ def is_available(row: pd.Series) -> bool:
         return float(row.get("free_qty", 0)) > 0
     except Exception:
         return False
+
+
+def build_series_candidate(row: pd.Series) -> dict[str, object]:
+    return {
+        "article": str(row.get("article", "")),
+        "article_norm": str(row.get("article_norm", "")),
+        "name": str(row.get("name", "")),
+        "brand": str(row.get("brand", "")),
+        "free_qty": float(row.get("free_qty", 0) or 0),
+        "total_qty": float(row.get("total_qty", 0) or 0),
+        "sale_price": float(row.get("sale_price", 0) or 0),
+        "sale_price_fmt": fmt_price(float(row.get("sale_price", 0) or 0)),
+        "is_original": not row_has_negative_link_markers(row),
+        "row_key": str(row.get("article_norm", "")),
+    }
+
+
+def get_series_candidates(df: pd.DataFrame, raw_query: str, series_mode: str = "original_only") -> dict[str, object]:
+    tokens = split_query_parts(raw_query)
+    if len(tokens) != 1:
+        return {"prefix": "", "candidates": []}
+
+    token = tokens[0]
+    token_norm = normalize_article(token)
+    if len(token_norm) < 4:
+        return {"prefix": token, "candidates": []}
+
+    candidates_by_key: dict[str, dict[str, object]] = {}
+
+    direct_df = df[df["article_norm"].str.startswith(token_norm, na=False)].copy()
+    for _, row in direct_df.iterrows():
+        candidate = build_series_candidate(row)
+        candidates_by_key[candidate["row_key"]] = candidate
+
+    linked_mask = df["name_code_list"].apply(lambda codes: any(str(code).startswith(token_norm) for code in codes))
+    linked_df = df[linked_mask].copy()
+    for _, row in linked_df.iterrows():
+        candidate = build_series_candidate(row)
+        if candidate["row_key"] not in candidates_by_key:
+            candidates_by_key[candidate["row_key"]] = candidate
+
+    candidates = list(candidates_by_key.values())
+    if series_mode != "show_all":
+        original_candidates = [c for c in candidates if bool(c.get("is_original", True))]
+        if original_candidates:
+            candidates = original_candidates
+
+    candidates.sort(key=lambda item: (str(item["article_norm"]), str(item["name"])))
+
+    if len(candidates) < 2:
+        return {"prefix": token, "candidates": []}
+
+    return {"prefix": token, "candidates": candidates}
 
 
 def parse_price_updates(text: str) -> list[tuple[str, float]]:
@@ -877,7 +971,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="toolbar">', unsafe_allow_html=True)
-st.markdown('<div class="toolbar-title">Поиск товара</div><div class="toolbar-sub">Можно искать по одному или нескольким артикулам. Пробелы, /, запятые и Enter тоже поддерживаются.</div>', unsafe_allow_html=True)
+st.markdown('<div class="toolbar-title">Поиск товара</div><div class="toolbar-sub">Можно искать по одному или нескольким артикулам. Пробелы, /, запятые и Enter тоже поддерживаются. Для серий вроде W203 или 106R0376 ниже появится отдельный блок выбора цветов.</div>', unsafe_allow_html=True)
 
 with st.form("search_form", clear_on_submit=False):
     search_value = st.text_area(
@@ -913,6 +1007,51 @@ if find_clicked:
 current_df = st.session_state.catalog_df
 submitted_query = st.session_state.submitted_query
 result_df = st.session_state.last_result
+
+series_seed_query = normalize_text(st.session_state.get("search_input", "") or submitted_query)
+series_lookup: dict[str, object] = {"prefix": "", "candidates": []}
+if isinstance(current_df, pd.DataFrame) and series_seed_query:
+    series_mode_internal = "show_all" if st.session_state.get("series_mode", "Только оригиналы") == "Показывать всё" else "original_only"
+    series_lookup = get_series_candidates(current_df, series_seed_query, series_mode_internal)
+
+maybe_series_query = len(split_query_parts(series_seed_query)) == 1 and len(normalize_article(series_seed_query)) >= 4
+if isinstance(current_df, pd.DataFrame) and maybe_series_query:
+    st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Серия / цвета по части артикула</div><div class="section-sub">Можно быстро выбрать нужные позиции серии и добавить их в основной поиск. Это отдельный помощник и он не ломает основной поиск.</div>', unsafe_allow_html=True)
+    st.radio("Режим серии", ["Только оригиналы", "Показывать всё"], key="series_mode", horizontal=True)
+    series_mode_internal = "show_all" if st.session_state.get("series_mode", "Только оригиналы") == "Показывать всё" else "original_only"
+    series_lookup = get_series_candidates(current_df, series_seed_query, series_mode_internal)
+    series_candidates = series_lookup.get("candidates", []) or []
+
+    if series_candidates:
+        st.caption(f"По префиксу **{html.escape(str(series_lookup.get('prefix', '')))}** найдено позиций: **{len(series_candidates)}**")
+        for cand in series_candidates:
+            key = f"series_pick_{cand['article_norm']}"
+            label = f"{cand['article']} — свободно: {fmt_qty(cand['free_qty'])} • {cand['sale_price_fmt']} руб. • {cand['name']}"
+            st.checkbox(label, key=key)
+
+        b1, b2, b3 = st.columns(3)
+        if b1.button("Добавить отмеченные в поиск", use_container_width=True):
+            selected_articles = [cand["article"] for cand in series_candidates if st.session_state.get(f"series_pick_{cand['article_norm']}", False)]
+            if selected_articles:
+                normalized_query = "\n".join(unique_preserve_order(selected_articles))
+                st.session_state.search_input = normalized_query
+                st.session_state.submitted_query = normalized_query
+                st.session_state.last_result = perform_search(current_df, normalized_query, search_mode)
+                st.rerun()
+            else:
+                st.warning("Сначала отметьте нужные позиции серии.")
+        if b2.button("Выбрать все", use_container_width=True):
+            for cand in series_candidates:
+                st.session_state[f"series_pick_{cand['article_norm']}"] = True
+            st.rerun()
+        if b3.button("Очистить выбор", use_container_width=True):
+            for cand in series_candidates:
+                st.session_state[f"series_pick_{cand['article_norm']}"] = False
+            st.rerun()
+    else:
+        st.info("По этой части артикула серия не найдена или найдено меньше двух связанных позиций.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
 st.markdown('<div class="section-title">Результаты</div><div class="section-sub">Точное совпадение — по колонке «Артикул». Найдено по названию — когда код сидит в названии той же позиции.</div>', unsafe_allow_html=True)
