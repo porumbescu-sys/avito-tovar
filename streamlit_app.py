@@ -435,6 +435,12 @@ def build_display_df(df: pd.DataFrame, price_mode: str, round100: bool, custom_d
     )
 
 
+
+def compact_multiline(text: str) -> str:
+    lines = [normalize_text(line) for line in str(text).splitlines()]
+    lines = [line for line in lines if line]
+    return "\n".join(lines)
+
 def build_offer_template(df: pd.DataFrame, query: str, round100: bool, footer_text: str, search_mode: str) -> str:
     parts = split_query_parts(query)
     if not parts:
@@ -494,13 +500,14 @@ def build_offer_template(df: pd.DataFrame, query: str, round100: bool, footer_te
             hashtag_parts.append(f"#{tok}")
 
     hashtag_parts = unique_preserve_order(hashtag_parts)
-    footer = footer_text.strip()
-    if lines and footer:
-        lines.append(footer)
-    if lines and hashtag_parts:
-        lines.append(",".join(hashtag_parts))
+    footer = compact_multiline(footer_text)
+    out_lines = [line for line in lines if normalize_text(line)]
+    if footer:
+        out_lines.extend(footer.split("\n"))
+    if hashtag_parts:
+        out_lines.append(",".join(hashtag_parts))
 
-    return "\n\n".join(lines)
+    return "\n".join(out_lines)
 
 def build_selected_price_template(df: pd.DataFrame, query: str, price_mode: str, round100: bool, custom_discount: float, search_mode: str) -> str:
     parts = split_query_parts(query)
