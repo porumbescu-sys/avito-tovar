@@ -612,101 +612,152 @@ st.markdown(
     header[data-testid="stHeader"] { background: rgba(0,0,0,0); }
     [data-testid="stDecoration"] { display: none; }
     .block-container { max-width: 1560px; padding-top: 3.4rem; padding-bottom: 1.2rem; }
-    [data-testid="stSidebar"] { background: linear-gradient(180deg, #0f172a 0%, #172554 100%); border-right: 1px solid rgba(255,255,255,.08); }
-    [data-testid="stSidebar"] * { color: #e5ecff !important; }
+
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #08122f 0%, #102358 55%, #172a63 100%);
+        border-right: 1px solid rgba(255,255,255,.08);
+    }
+    [data-testid="stSidebar"] * { color: #e9efff !important; }
+
+    .sidebar-brand {
+        display:flex; align-items:center; gap:12px;
+        margin: 0.15rem 0 0.95rem 0;
+        padding: 0.15rem 0.1rem 0.35rem 0.1rem;
+    }
+    .sidebar-brand-logo {
+        width:44px; height:44px; border-radius:14px;
+        background: linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.08));
+        display:flex; align-items:center; justify-content:center;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.15);
+        font-size:22px;
+    }
+    .sidebar-brand-title { font-size: 1.22rem; font-weight: 900; line-height:1.05; color:#ffffff !important; }
+    .sidebar-brand-sub { font-size: .82rem; color: #c7d6ff !important; margin-top: 4px; }
+
+    .sidebar-card {
+        background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.04));
+        border: 1px solid rgba(255,255,255,.12);
+        border-radius: 20px;
+        padding: 1rem 0.95rem 0.95rem 0.95rem;
+        margin: 0.95rem 0 1.05rem 0;
+        box-shadow: 0 10px 22px rgba(2, 8, 23, .22), inset 0 1px 0 rgba(255,255,255,.05);
+    }
+    .sidebar-card-title {
+        font-size: 1.02rem; font-weight: 900; color:#ffffff !important; margin-bottom: .45rem;
+    }
+    .sidebar-card-note {
+        font-size: .78rem; line-height: 1.45; color:#c7d6ff !important; margin-bottom: .6rem;
+    }
+    .sidebar-status {
+        background: rgba(7, 31, 74, .9);
+        border: 1px solid rgba(255,255,255,.06);
+        border-radius: 14px;
+        padding: .72rem .78rem;
+        color:#ffffff !important;
+        font-weight: 800;
+        margin-top: .55rem;
+    }
+    .sidebar-mini { font-size:.78rem; color:#c7d6ff !important; line-height:1.45; margin-top:.65rem; }
+
     [data-testid="stSidebar"] .stFileUploader section {
-        background: rgba(255,255,255,0.06) !important;
-        border: 1px dashed rgba(255,255,255,0.25) !important;
-        border-radius: 14px !important;
+        background: rgba(255,255,255,0.03) !important;
+        border: 1px dashed rgba(255,255,255,0.22) !important;
+        border-radius: 16px !important;
+        padding: 0.6rem !important;
     }
     [data-testid="stSidebar"] .stFileUploader button,
     [data-testid="stSidebar"] .stFileUploader button[kind],
     [data-testid="stSidebar"] .stFileUploader [data-testid="stFileUploaderDropzone"] button,
     [data-testid="stSidebar"] .stFileUploader [data-testid="baseButton-secondary"],
     [data-testid="stSidebar"] .stFileUploader [data-baseweb="button"] {
-        background: linear-gradient(180deg, #315efb 0%, #1d4ed8 100%) !important;
+        background: linear-gradient(180deg, #3767ff 0%, #2455ef 100%) !important;
         color: #ffffff !important;
         -webkit-text-fill-color: #ffffff !important;
-        border: 1px solid #2b57f1 !important;
-        border-radius: 12px !important;
+        border: none !important;
+        border-radius: 14px !important;
         font-weight: 800 !important;
         opacity: 1 !important;
-        box-shadow: 0 8px 18px rgba(49, 94, 251, 0.28) !important;
+        box-shadow: 0 10px 20px rgba(49, 94, 251, 0.30) !important;
     }
     [data-testid="stSidebar"] .stFileUploader small,
     [data-testid="stSidebar"] .stFileUploader span,
     [data-testid="stSidebar"] .stFileUploader label {
-        color: #e5ecff !important;
-        -webkit-text-fill-color: #e5ecff !important;
+        color: #dbe6ff !important;
+        -webkit-text-fill-color: #dbe6ff !important;
         opacity: 1 !important;
+    }
+    [data-testid="stSidebar"] .stButton > button,
+    [data-testid="stSidebar"] .stDownloadButton > button {
+        width: 100% !important;
+        min-height: 48px !important;
+        background: linear-gradient(180deg, #3767ff 0%, #2455ef 100%) !important;
+        color: #ffffff !important;
+        border: none !important;
+        border-radius: 16px !important;
+        font-weight: 900 !important;
+        font-size: 1rem !important;
+        box-shadow: 0 10px 20px rgba(49, 94, 251, 0.30) !important;
+    }
+    [data-testid="stSidebar"] .stButton > button:hover,
+    [data-testid="stSidebar"] .stDownloadButton > button:hover {
+        background: linear-gradient(180deg, #4673ff 0%, #2a5cf2 100%) !important;
+        color: #ffffff !important;
+    }
+    [data-testid="stSidebar"] .stButton > button:disabled,
+    [data-testid="stSidebar"] .stDownloadButton > button:disabled {
+        background: #5f6f96 !important;
+        color: #edf2ff !important;
+        opacity: .84 !important;
+        box-shadow: none !important;
     }
     [data-testid="stSidebar"] .stNumberInput input,
     [data-testid="stSidebar"] .stTextInput input,
     [data-testid="stSidebar"] .stTextArea textarea,
     [data-testid="stSidebar"] [data-baseweb="textarea"] textarea,
     [data-testid="stSidebar"] [data-baseweb="input"] input,
-    [data-testid="stSidebar"] [data-baseweb="base-input"] input {
+    [data-testid="stSidebar"] [data-baseweb="base-input"] input,
+    [data-testid="stSidebar"] [data-baseweb="select"] > div {
         background: #ffffff !important;
         color: #0f172a !important;
         -webkit-text-fill-color: #0f172a !important;
         caret-color: #0f172a !important;
+        border-radius: 16px !important;
+        border: none !important;
+        box-shadow: inset 0 0 0 1px #dbe4f3 !important;
+    }
+    [data-testid="stSidebar"] .stTextArea textarea { line-height: 1.55 !important; }
+    [data-testid="stSidebar"] .stTextArea textarea::placeholder,
+    [data-testid="stSidebar"] [data-baseweb="textarea"] textarea::placeholder,
+    [data-testid="stSidebar"] .stNumberInput input::placeholder,
+    [data-testid="stSidebar"] .stTextInput input::placeholder {
+        color: #7b8798 !important;
+        -webkit-text-fill-color: #7b8798 !important;
         opacity: 1 !important;
     }
     [data-testid="stSidebar"] .stNumberInput button,
     [data-testid="stSidebar"] .stNumberInput [data-baseweb="button"],
     [data-testid="stSidebar"] .stNumberInput button svg,
     [data-testid="stSidebar"] .stNumberInput [data-baseweb="button"] svg {
-        background: #1e40af !important;
-        color: #ffffff !important;
-        fill: #ffffff !important;
-        stroke: #ffffff !important;
-        -webkit-text-fill-color: #ffffff !important;
-        border-color: #1d4ed8 !important;
+        background: #edf3ff !important;
+        color: #1d4ed8 !important;
+        fill: #1d4ed8 !important;
+        stroke: #1d4ed8 !important;
+        border-color: #d9e4ff !important;
         opacity: 1 !important;
     }
-    [data-testid="stSidebar"] .stTextArea textarea::placeholder,
-    [data-testid="stSidebar"] [data-baseweb="textarea"] textarea::placeholder,
-    [data-testid="stSidebar"] .stNumberInput input::placeholder,
-    [data-testid="stSidebar"] .stTextInput input::placeholder {
-        color: #64748b !important;
-        -webkit-text-fill-color: #64748b !important;
-        opacity: 1 !important;
-    }
-    [data-testid="stSidebar"] [data-baseweb="textarea"],
-    [data-testid="stSidebar"] [data-baseweb="input"] {
-        background: #ffffff !important;
-        border-radius: 14px !important;
-    }
-    [data-testid="stSidebar"] [data-baseweb="select"] > div,
-    [data-testid="stSidebar"] [data-baseweb="select"] span,
-    [data-testid="stSidebar"] [data-baseweb="select"] input {
-        color: #0f172a !important;
-        -webkit-text-fill-color: #0f172a !important;
-    }
-
-    [data-testid="stSidebar"] .stButton > button,
-    [data-testid="stSidebar"] .stDownloadButton > button {
-        background: linear-gradient(180deg, #315efb 0%, #1d4ed8 100%) !important;
-        color: #ffffff !important;
-        border: 1px solid #2b57f1 !important;
-        border-radius: 14px !important;
+    [data-testid="stSidebar"] .stRadio > label,
+    [data-testid="stSidebar"] .stSelectbox > label,
+    [data-testid="stSidebar"] .stCheckbox > label,
+    [data-testid="stSidebar"] .stNumberInput > label,
+    [data-testid="stSidebar"] .stTextArea > label,
+    [data-testid="stSidebar"] .stFileUploader > label {
+        color:#ffffff !important;
         font-weight: 800 !important;
-        box-shadow: 0 8px 18px rgba(49, 94, 251, 0.28) !important;
+        font-size: .92rem !important;
     }
-    [data-testid="stSidebar"] .stButton > button:hover,
-    [data-testid="stSidebar"] .stDownloadButton > button:hover {
-        background: linear-gradient(180deg, #3b6bff 0%, #2457ef 100%) !important;
-        color: #ffffff !important;
-        border-color: #3b6bff !important;
-    }
-    [data-testid="stSidebar"] .stButton > button:disabled,
-    [data-testid="stSidebar"] .stDownloadButton > button:disabled {
-        background: #1e293b !important;
-        color: #ffffff !important;
-        border: 1px solid #475569 !important;
-        opacity: 1 !important;
-        box-shadow: none !important;
-    }
+    [data-testid="stSidebar"] .stCheckbox p,
+    [data-testid="stSidebar"] .stRadio p { color:#eef3ff !important; }
+
     .topbar { background: linear-gradient(90deg, #0f172a 0%, #1d4ed8 100%); color: white; padding: 16px 18px; border-radius: 18px; margin-top: 0.4rem; margin-bottom: 10px; box-shadow: 0 12px 28px rgba(15, 23, 42, .18); }
     .topbar-grid { display:grid; grid-template-columns: 1.6fr 1fr 1fr 1fr; gap: 10px; align-items:center; }
     .brand-box { display:flex; gap:12px; align-items:center; }
@@ -725,24 +776,43 @@ st.markdown(
 )
 
 with st.sidebar:
-    st.markdown("## 📦 Мой Товар")
-    st.caption("Streamlit-версия для загрузки в облако")
-    uploaded = st.file_uploader("Загрузить прайс", type=["xlsx", "xls", "xlsm", "csv"])
+    st.markdown(
+        """
+        <div class="sidebar-brand">
+          <div class="sidebar-brand-logo">📦</div>
+          <div>
+            <div class="sidebar-brand-title">Мой Товар</div>
+            <div class="sidebar-brand-sub">Почти как локальная версия 💙</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-title">Загрузить прайс</div>', unsafe_allow_html=True)
+    uploaded = st.file_uploader("Загрузить прайс", type=["xlsx", "xls", "xlsm", "csv"], label_visibility="collapsed")
     if uploaded is not None:
         try:
             st.session_state.catalog_df = load_price_file(uploaded.name, uploaded.getvalue())
             st.session_state.catalog_name = uploaded.name
-            st.success(f"Загружен: {uploaded.name}")
         except Exception as exc:
             st.error(f"Ошибка: {exc}")
+    file_caption = st.session_state.get("catalog_name", "Файл ещё не выбран")
+    st.markdown(f'<div class="sidebar-status">Загружен: {html.escape(file_caption)}</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("### Быстрая правка цен")
+    st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-title">Быстрая правка цен</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-note">Вставьте строки вида <b>CE278A 8900</b>, <b>CF364A - 29700</b> или прямо текст из Telegram.</div>', unsafe_allow_html=True)
     st.text_area(
         "Вставьте строки вроде: CE278A 8900",
         key="price_patch_input",
         height=110,
         label_visibility="collapsed",
-        placeholder="CE278A 8900\nCE278AC 7900\nCF364A - 29700 🔽",
+        placeholder="""CE278A 8900
+CE278AC 7900
+CF364A - 29700 🔽""",
     )
     if st.button("Править цены в прайсе", use_container_width=True):
         if isinstance(st.session_state.catalog_df, pd.DataFrame):
@@ -751,24 +821,31 @@ with st.sidebar:
             )
             st.session_state.catalog_df = updated_df
             st.session_state.patch_message = patch_message
-
-            # Если пользователь уже что-то искал, сразу пересчитываем результаты
-            # по обновлённому прайсу, чтобы таблица и шаблоны не оставались старыми.
             submitted_query = normalize_text(st.session_state.get("submitted_query", ""))
             if submitted_query:
                 st.session_state.last_result = perform_search(updated_df, submitted_query, st.session_state.get("search_mode", "Только артикул"))
         else:
             st.session_state.patch_message = "Сначала загрузите прайс."
     if st.session_state.patch_message:
-        st.caption(st.session_state.patch_message)
+        st.markdown(f'<div class="sidebar-mini">{html.escape(st.session_state.patch_message)}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="sidebar-mini">Прайс сохраняется локально. После правок цены не пропадут до загрузки нового файла.</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.divider()
-    st.markdown("### ⚙️ Настройки")
+    st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-title">⚙️ Настройки</div>', unsafe_allow_html=True)
     st.selectbox("Режим поиска", ["Только артикул", "Умный", "Артикул + название + бренд"], key="search_mode")
     st.radio("Какая цена главная", ["-12%", "-20%", "Своя скидка"], key="price_mode")
     st.number_input("Своя скидка, %", min_value=0.0, max_value=99.0, step=1.0, key="custom_discount")
     st.checkbox("Округлять вверх до 100", key="round100")
-    st.text_area("Текст шаблона 1", key="template1_footer", height=170)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-title">Текст шаблона 1</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-note">Этот текст добавляется один раз в конце шаблона 1. Хэштеги по артикулам подставляются автоматически.</div>', unsafe_allow_html=True)
+    st.text_area("Текст шаблона 1", key="template1_footer", height=170, label_visibility="collapsed")
+    st.markdown('<div class="sidebar-mini">Текст сохраняется локально и останется до следующего изменения.</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 catalog_df = st.session_state.get("catalog_df")
 file_name = st.session_state.get("catalog_name", "ещё не загружен")
