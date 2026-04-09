@@ -378,19 +378,28 @@ def find_best_row_for_token(df: pd.DataFrame, token: str, search_mode: str) -> t
 
     return None, ""
 
+
+def resolve_query_tokens(df: pd.DataFrame, query: str, search_mode: str) -> tuple[list[tuple[str, pd.Series, str]], list[str]]:
+    resolved: list[tuple[str, pd.Series, str]] = []
+    missing: list[str] = []
+    for part in split_query_parts(query):
+        row, match_type = find_best_row_for_token(df, part, search_mode)
+        if row is None:
+            missing.append(part)
+        else:
+            resolved.append((part, row, match_type))
+    return resolved, missing
+
 def perform_search(df: pd.DataFrame, query: str, search_mode: str) -> pd.DataFrame:
-    parts = split_query_parts(query)
-    if not parts:
+    resolved, _ = resolve_query_tokens(df, query, search_mode)
+    if not resolved:
         return df.iloc[0:0].copy()
 
     rows = []
     seen_articles: set[str] = set()
     rank_map = {"exact": 0, "linked": 1, "similar": 2}
 
-    for part in parts:
-        row, match_type = find_best_row_for_token(df, part, search_mode)
-        if row is None:
-            continue
+    for part, row, match_type in resolved:
         article_key = str(row["article_norm"])
         if article_key in seen_articles:
             continue
@@ -400,9 +409,6 @@ def perform_search(df: pd.DataFrame, query: str, search_mode: str) -> pd.DataFra
         row_dict["match_query"] = part
         row_dict["_rank"] = rank_map.get(match_type, 99)
         rows.append(row_dict)
-
-    if not rows:
-        return df.iloc[0:0].copy()
 
     out = pd.DataFrame(rows).sort_values(["_rank", "article_norm"]).drop(columns=["_rank"]).reset_index(drop=True)
     return out
