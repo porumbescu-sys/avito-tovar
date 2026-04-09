@@ -746,9 +746,17 @@ with st.sidebar:
     )
     if st.button("Править цены в прайсе", use_container_width=True):
         if isinstance(st.session_state.catalog_df, pd.DataFrame):
-            st.session_state.catalog_df, st.session_state.patch_message = apply_price_updates(
+            updated_df, patch_message = apply_price_updates(
                 st.session_state.catalog_df, st.session_state.price_patch_input
             )
+            st.session_state.catalog_df = updated_df
+            st.session_state.patch_message = patch_message
+
+            # Если пользователь уже что-то искал, сразу пересчитываем результаты
+            # по обновлённому прайсу, чтобы таблица и шаблоны не оставались старыми.
+            submitted_query = normalize_text(st.session_state.get("submitted_query", ""))
+            if submitted_query:
+                st.session_state.last_result = perform_search(updated_df, submitted_query, st.session_state.get("search_mode", "Только артикул"))
         else:
             st.session_state.patch_message = "Сначала загрузите прайс."
     if st.session_state.patch_message:
