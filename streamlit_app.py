@@ -342,21 +342,25 @@ def find_best_row_for_token(df: pd.DataFrame, token: str, search_mode: str) -> t
 
     exact = df[df["article_norm"] == article_norm]
     if not exact.empty:
-        return exact.iloc[0], "exact"
+        preferred = exact[~exact["name"].str.contains(r"уцен|совмест|совм", case=False, na=False)]
+        chosen = preferred.iloc[0] if not preferred.empty else exact.iloc[0]
+        return chosen, "exact"
 
-    if search_mode == "Только артикул":
-        return None, ""
-
+    # ВАЖНО: linked-поиск по названию нужен даже в режиме "Только артикул".
+    # Для этого прайса часть коротких/длинных артикулов живёт именно в названии.
     name_matches = df[df["name_tokens"].map(lambda toks: article_norm in toks)]
     if not name_matches.empty:
         preferred = name_matches[~name_matches["name"].str.contains(r"уцен|совмест|совм", case=False, na=False)]
         chosen = preferred.iloc[0] if not preferred.empty else name_matches.iloc[0]
         return chosen, "linked"
 
-    if search_mode == "Артикул + название + бренд":
+    # А вот свободный текстовый contains включаем только в расширенном режиме.
+    if search_mode in {"Умный", "Артикул + название + бренд"}:
         contains = df[df["search_blob"].str.contains(re.escape(token.upper()), na=False)]
         if not contains.empty:
-            return contains.iloc[0], "similar"
+            preferred = contains[~contains["name"].str.contains(r"уцен|совмест|совм", case=False, na=False)]
+            chosen = preferred.iloc[0] if not preferred.empty else contains.iloc[0]
+            return chosen, "similar"
 
     return None, ""
 
@@ -436,17 +440,12 @@ def build_offer_template(df: pd.DataFrame, query: str, round100: bool, footer_te
 
     for item in groups.values():
         row = item["row"]
-        tokens = []
-        seen = set()
-        for t in item["tokens"] + [str(row["article"])] + tokenize_text(str(row["name"])):
-            t_norm = normalize_article(t)
-            if not t_norm or t_norm in seen:
-                continue
-            if len(t_norm) < 4:
-                continue
-            if t_norm in tokenize_text(str(row["name"])) or t_norm == str(row["article_norm"]):
-                tokens.append(t_norm)
-                seen.add(t_norm)
+        tokens = unique_preserve_order([normalize_article(t) for t in item["tokens"] if normalize_article(t)])
+
+        # Хэштеги: только те артикулы, которые пользователь реально вводил и которые привели к этой позиции.
+        # Если пользователь искал только по главному артикулу, добавим его.
+        if not tokens:
+            tokens = [str(row["article_norm"])]
 
         if is_available(row):
             avito = float(row["sale_price"]) * (1 - DEFAULT_DISCOUNT_1 / 100)
@@ -464,11 +463,13 @@ def build_offer_template(df: pd.DataFrame, query: str, round100: bool, footer_te
             head = f"{prefix} --- продан"
 
         lines.append(head)
-        hashtag_parts.extend([f"#{t}" for t in tokens[:12]])
+        hashtag_parts.extend([f"#{t}" for t in tokens])
 
     for token in missing_tokens:
+        tok = normalize_article(token)
         lines.append(f"{token} --- продан")
-        hashtag_parts.append(f"#{normalize_article(token)}")
+        if tok:
+            hashtag_parts.append(f"#{tok}")
 
     hashtag_parts = unique_preserve_order(hashtag_parts)
     footer = footer_text.strip()
