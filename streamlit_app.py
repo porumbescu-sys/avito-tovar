@@ -194,6 +194,10 @@ def round_up_to_100(value: float) -> int:
     return int(math.ceil(float(value) / 100.0) * 100)
 
 
+def round_to_nearest_100(value: float) -> int:
+    return int(math.floor(float(value) / 100.0 + 0.5) * 100)
+
+
 def current_discount(price_mode: str, custom_discount: float) -> float:
     if price_mode == "-12%":
         return DEFAULT_DISCOUNT_1
@@ -466,14 +470,14 @@ def build_offer_template(df: pd.DataFrame, query: str, round100: bool, footer_te
             tokens = [str(row["article_norm"])]
 
         if is_available(row):
-            avito = float(row["sale_price"]) * (1 - DEFAULT_DISCOUNT_1 / 100)
-            cash = avito * 0.90
+            avito_raw = float(row["sale_price"]) * (1 - DEFAULT_DISCOUNT_1 / 100)
+            cash_raw = avito_raw * 0.90
             if round100:
-                avito = round_up_to_100(avito)
-                cash = round_up_to_100(cash)
+                avito = round_up_to_100(avito_raw)
+                cash = round_to_nearest_100(cash_raw)
             else:
-                avito = round(avito)
-                cash = round(cash)
+                avito = round(avito_raw)
+                cash = round(cash_raw)
             head = f"{row['article']} --- {fmt_price_with_rub(avito)} - Авито / {fmt_price_with_rub(cash)} за наличный расчет"
         else:
             color = detect_color(str(row["name"]))
