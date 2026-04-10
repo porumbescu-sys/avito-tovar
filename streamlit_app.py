@@ -190,6 +190,16 @@ def unique_preserve_order(items: list[str]) -> list[str]:
         out.append(item)
     return out
 
+def is_negative_substitute_row(row: pd.Series) -> bool:
+    text = f"{row.get('article', '')} {row.get('name', '')}".upper()
+    markers = [
+        "УЦЕН", "СОВМЕСТ", "СОВМ", "COMPAT", "COMPATIBLE", "CACTUS",
+        "STATIC CONTROL", "PROFILINE", "NV PRINT", "KATUN", "SAKURA",
+        "REMAN", "REFURB", "ВОССТ", "КОНТРАКТ", "Б/У", "БУ ", " USED "
+    ]
+    return any(marker in text for marker in markers)
+
+
 
 def find_column(columns: list[str], candidates: list[str]) -> Optional[str]:
     lower_map = {str(col).strip().lower(): col for col in columns}
@@ -405,10 +415,11 @@ def apply_price_updates(df: pd.DataFrame, updates_text: str) -> tuple[pd.DataFra
         if not mask.any():
             linked = out[out["name_tokens"].map(lambda toks: article_norm in toks)]
             if not linked.empty:
-                preferred = linked[~linked["name"].str.contains(r"уцен|совмест|совм", case=False, na=False)]
-                chosen = preferred.iloc[0] if not preferred.empty else linked.iloc[0]
-                mask = out["article_norm"] == str(chosen["article_norm"])
-                match_source = "linked"
+                safe_linked = linked[~linked.apply(is_negative_substitute_row, axis=1)]
+                if not safe_linked.empty:
+                    chosen = safe_linked.iloc[0]
+                    mask = out["article_norm"] == str(chosen["article_norm"])
+                    match_source = "linked"
 
         if mask.any():
             out.loc[mask, "sale_price"] = float(new_price)
@@ -436,24 +447,28 @@ def find_best_row_for_token(df: pd.DataFrame, token: str, search_mode: str) -> t
 
     exact = df[df["article_norm"] == article_norm]
     if not exact.empty:
-        preferred = exact[~exact["name"].str.contains(r"уцен|совмест|совм", case=False, na=False)]
-        chosen = preferred.iloc[0] if not preferred.empty else exact.iloc[0]
+        exact_safe = exact[~exact.apply(is_negative_substitute_row, axis=1)]
+        chosen = exact_safe.iloc[0] if not exact_safe.empty else exact.iloc[0]
         return chosen, "exact"
 
     # Связанные короткие/длинные артикулы часто живут только в названии.
-    # Поэтому linked-поиск нужен даже в режиме "Только артикул".
+    # Но совместимые/уценка нельзя подсовывать автоматически вместо отсутствующей позиции.
     name_matches = df[df["name_tokens"].map(lambda toks: article_norm in toks)]
     if not name_matches.empty:
-        preferred = name_matches[~name_matches["name"].str.contains(r"уцен|совмест|совм", case=False, na=False)]
-        chosen = preferred.iloc[0] if not preferred.empty else name_matches.iloc[0]
-        return chosen, "linked"
+        safe_name_matches = name_matches[~name_matches.apply(is_negative_substitute_row, axis=1)]
+        if not safe_name_matches.empty:
+            chosen = safe_name_matches.iloc[0]
+            return chosen, "linked"
+        return None, ""
 
     if search_mode in {"Умный", "Артикул + название + бренд"}:
         contains = df[df["search_blob"].str.contains(re.escape(token.upper()), na=False)]
         if not contains.empty:
-            preferred = contains[~contains["name"].str.contains(r"уцен|совмест|совм", case=False, na=False)]
-            chosen = preferred.iloc[0] if not preferred.empty else contains.iloc[0]
-            return chosen, "similar"
+            safe_contains = contains[~contains.apply(is_negative_substitute_row, axis=1)]
+            if not safe_contains.empty:
+                chosen = safe_contains.iloc[0]
+                return chosen, "similar"
+            return None, ""
 
     return None, ""
 
