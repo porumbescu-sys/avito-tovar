@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from typing import Dict, Optional
 
+import openpyxl
+from openpyxl import load_workbook
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -38,6 +40,13 @@ COLUMN_ALIASES = {
     "price": ["Цена", "Цена продажи", "Продажа", "розница", "price"],
 }
 
+AVITO_COLUMN_ALIASES = {
+    "ad_id": ["Номер объявления", "ID объявления", "Номер", "ID"],
+    "title": ["Название объявления", "Название", "Заголовок"],
+    "price": ["Цена"],
+    "url": ["Ссылка", "URL", "Link", "Ссылка на объявление"],
+}
+
 COLOR_KEYWORDS = [
     ("желтый", "желтый"),
     ("yellow", "желтый"),
@@ -66,6 +75,8 @@ def init_state() -> None:
     defaults = {
         "catalog_df": None,
         "catalog_name": "ещё не загружен",
+        "avito_df": None,
+        "avito_name": "ещё не загружен",
         "search_input": "",
         "submitted_query": "",
         "last_result": None,
@@ -122,7 +133,7 @@ def is_candidate_article_norm(norm: str) -> bool:
 
 def extract_article_candidates_from_text(text: object) -> list[str]:
     raw = str(text or "").upper()
-    prepared = re.sub(r"[|/\,;:()\[\]{}]+", " ", raw)
+    prepared = re.sub(r"[|/\\,;:()\[\]{}]+", " ", raw)
     prepared = prepared.replace("№", " ")
     chunks = re.findall(r"[A-ZА-Я0-9._-]{3,}", prepared)
     out: list[str] = []
@@ -177,8 +188,6 @@ def tokenize_text(value: object) -> list[str]:
     return [t for t in re.split(r"[^A-Za-zА-Яа-я0-9]+", text.upper()) if t]
 
 
-
-
 def unique_preserve_order(items: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -190,6 +199,7 @@ def unique_preserve_order(items: list[str]) -> list[str]:
         out.append(item)
     return out
 
+
 def is_negative_substitute_row(row: pd.Series) -> bool:
     text = f"{row.get('article', '')} {row.get('name', '')}".upper()
     markers = [
@@ -198,7 +208,6 @@ def is_negative_substitute_row(row: pd.Series) -> bool:
         "REMAN", "REFURB", "ВОССТ", "КОНТРАКТ", "Б/У", "БУ ", " USED "
     ]
     return any(marker in text for marker in markers)
-
 
 
 def find_column(columns: list[str], candidates: list[str]) -> Optional[str]:
@@ -273,6 +282,126 @@ def load_price_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
         + data["brand"].fillna("")
     ).str.upper()
     return data.reset_index(drop=True)
+
+
+def parse_excel_hyperlink_formula(value: object) -> tuple[str, str]:
+    text = str(value or "").strip()
+    m = re.match(
+        r'^\s*=\s*(?:HYPERLINK|ГИПЕРССЫЛКА)\(\s*"((?:[^"]|"")*)"\s*[,;]\s*"((?:[^"]|"")*)"\s*\)\s*$',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return "", ""
+    url = m.group(1).replace('""', '"').strip()
+    label = m.group(2).replace('""', '"').strip()
+    return url, label
+
+
+def extract_excel_cell_display_and_url(cell) -> tuple[object, str]:
+    value = cell.value
+    if isinstance(value, str):
+        url, label = parse_excel_hyperlink_formula(value)
+        if url:
+            return label or "", url
+
+    try:
+        if getattr(cell, "hyperlink", None) is not None:
+            target = getattr(cell.hyperlink, "target", "") or ""
+            return value, str(target).strip()
+    except Exception:
+        pass
+
+    return value, ""
+
+
+@st.cache_data(show_spinner=False)
+def load_avito_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
+    suffix = Path(file_name).suffix.lower()
+
+    if suffix in [".xlsx", ".xlsm", ".xltx", ".xltm"]:
+        workbook = load_workbook(io.BytesIO(file_bytes), data_only=False, read_only=False)
+        worksheet = workbook.active
+
+        headers: list[str] = []
+        for idx in range(1, worksheet.max_column + 1):
+            header_val, _ = extract_excel_cell_display_and_url(worksheet.cell(1, idx))
+            header_text = normalize_text(header_val) if header_val is not None else f"Unnamed:{idx}"
+            headers.append(header_text or f"Unnamed:{idx}")
+
+        rows: list[dict[str, object]] = []
+        for row_idx in range(2, worksheet.max_row + 1):
+            record: dict[str, object] = {}
+            has_any_value = False
+            for col_idx, header in enumerate(headers, start=1):
+                display, url = extract_excel_cell_display_and_url(worksheet.cell(row_idx, col_idx))
+                if display not in (None, ""):
+                    has_any_value = True
+                record[header] = display
+                if url:
+                    record[f"__url__{header}"] = url
+            if has_any_value:
+                rows.append(record)
+
+        raw = pd.DataFrame(rows)
+    else:
+        bio = io.BytesIO(file_bytes)
+        if suffix == ".csv":
+            try:
+                raw = pd.read_csv(bio)
+            except UnicodeDecodeError:
+                bio.seek(0)
+                raw = pd.read_csv(bio, encoding="cp1251")
+        else:
+            raw = pd.read_excel(bio)
+
+    raw = raw.dropna(how="all")
+    mapping = {key: find_column(list(raw.columns), aliases) for key, aliases in AVITO_COLUMN_ALIASES.items()}
+    if not mapping.get("title"):
+        raise ValueError("Не удалось определить колонку 'Название объявления'.")
+
+    ad_id_col = mapping.get("ad_id")
+    title_col = mapping.get("title")
+    price_col = mapping.get("price")
+    url_col = mapping.get("url")
+
+    result = pd.DataFrame()
+    result["ad_id"] = raw[ad_id_col] if ad_id_col else ""
+    result["title"] = raw[title_col] if title_col else ""
+    result["price"] = raw[price_col] if price_col else ""
+    result["url"] = raw[url_col] if url_col else ""
+
+    ad_id_url_col = f"__url__{ad_id_col}" if ad_id_col and f"__url__{ad_id_col}" in raw.columns else None
+    title_url_col = f"__url__{title_col}" if title_col and f"__url__{title_col}" in raw.columns else None
+
+    def norm_ad_id(value: object) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        if not text or text.lower() == "nan":
+            return ""
+        if re.fullmatch(r"\d+\.0", text):
+            text = text[:-2]
+        return text
+
+    result["ad_id"] = result["ad_id"].apply(norm_ad_id)
+    result["title"] = result["title"].fillna("").astype(str).str.strip()
+    result["price"] = result["price"].fillna("").astype(str).str.strip()
+    result["url"] = result["url"].fillna("").astype(str).str.strip()
+
+    if ad_id_url_col:
+        ad_urls = raw[ad_id_url_col].fillna("").astype(str).str.strip()
+        result.loc[result["url"] == "", "url"] = ad_urls[result["url"] == ""]
+    if title_url_col:
+        title_urls = raw[title_url_col].fillna("").astype(str).str.strip()
+        result.loc[result["url"] == "", "url"] = title_urls[result["url"] == ""]
+
+    result["title_norm"] = result["title"].apply(lambda x: normalize_text(x).upper())
+    result["title_codes"] = result["title"].apply(extract_article_candidates_from_text)
+    result["row_key"] = result.apply(lambda r: norm_ad_id(r["ad_id"]) or normalize_text(r["title"]).upper()[:120], axis=1)
+    result = result[result["title"] != ""].copy()
+    result.reset_index(drop=True, inplace=True)
+    return result
 
 
 def round_up_to_100(value: float) -> int:
@@ -440,6 +569,7 @@ def apply_price_updates(df: pd.DataFrame, updates_text: str) -> tuple[pd.DataFra
         message += " | Не найдено: " + ", ".join(missed[:10])
     return out, message
 
+
 def find_best_row_for_token(df: pd.DataFrame, token: str, search_mode: str) -> tuple[Optional[pd.Series], str]:
     article_norm = normalize_article(token)
     if not article_norm:
@@ -451,8 +581,6 @@ def find_best_row_for_token(df: pd.DataFrame, token: str, search_mode: str) -> t
         chosen = exact_safe.iloc[0] if not exact_safe.empty else exact.iloc[0]
         return chosen, "exact"
 
-    # Связанные короткие/длинные артикулы часто живут только в названии.
-    # Но совместимые/уценка нельзя подсовывать автоматически вместо отсутствующей позиции.
     name_matches = df[df["name_tokens"].map(lambda toks: article_norm in toks)]
     if not name_matches.empty:
         safe_name_matches = name_matches[~name_matches.apply(is_negative_substitute_row, axis=1)]
@@ -483,6 +611,7 @@ def resolve_query_tokens(df: pd.DataFrame, query: str, search_mode: str) -> tupl
         else:
             resolved.append((part, row, match_type))
     return resolved, missing
+
 
 def perform_search(df: pd.DataFrame, query: str, search_mode: str) -> pd.DataFrame:
     resolved, _ = resolve_query_tokens(df, query, search_mode)
@@ -525,11 +654,11 @@ def build_display_df(df: pd.DataFrame, price_mode: str, round100: bool, custom_d
     )
 
 
-
 def compact_multiline(text: str) -> str:
     lines = [normalize_text(line) for line in str(text).splitlines()]
     lines = [line for line in lines if line]
     return "\n".join(lines)
+
 
 def build_offer_template(df: pd.DataFrame, query: str, round100: bool, footer_text: str, search_mode: str) -> str:
     parts = split_query_parts(query)
@@ -559,8 +688,6 @@ def build_offer_template(df: pd.DataFrame, query: str, round100: bool, footer_te
 
     for item in groups.values():
         row = item["row"]
-        # Хэштеги и группировка строятся только по тем артикулам, которые реально ввёл пользователь
-        # и которые привели к этой позиции.
         tokens = unique_preserve_order([normalize_article(t) for t in item["tokens"] if normalize_article(t)])
         if not tokens:
             tokens = [str(row["article_norm"])]
@@ -598,6 +725,7 @@ def build_offer_template(df: pd.DataFrame, query: str, round100: bool, footer_te
         out_lines.append(",".join(hashtag_parts))
 
     return "\n".join(out_lines)
+
 
 def build_selected_price_template(df: pd.DataFrame, query: str, price_mode: str, round100: bool, custom_discount: float, search_mode: str) -> str:
     parts = split_query_parts(query)
@@ -652,7 +780,7 @@ def render_results_table(df: pd.DataFrame, price_mode: str, round100: bool, cust
               <td>{fmt_qty(row['total_qty'])}</td>
               <td class='sale-col'>{fmt_price(row['sale_price'])} руб.</td>
               <td class='selected-col'>{selected_fmt}</td>
-              <td><button class='copy-btn' onclick="navigator.clipboard.writeText('{selected_fmt}').then(() => {{ this.innerText = 'Скопировано'; setTimeout(() => this.innerText = 'Копировать цену', 1200); }})">Копировать цену</button></td>
+              <td><button class='copy-btn' onclick=\"navigator.clipboard.writeText('{selected_fmt}').then(() => {{ this.innerText = 'Скопировано'; setTimeout(() => this.innerText = 'Копировать цену', 1200); }})\">Копировать цену</button></td>
             </tr>
             """
         )
@@ -757,6 +885,59 @@ def get_series_candidates(df: pd.DataFrame, raw_query: str, series_mode: str = "
         return {"prefix": token, "candidates": []}
 
     return {"prefix": token, "candidates": candidates}
+
+
+def find_avito_ads(avito_df: pd.DataFrame, query: str, result_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    if avito_df is None or avito_df.empty:
+        return pd.DataFrame()
+
+    query_tokens = unique_preserve_order([normalize_article(x) for x in split_query_parts(query) if normalize_article(x)])
+    token_pool = list(query_tokens)
+
+    if isinstance(result_df, pd.DataFrame) and not result_df.empty:
+        for _, row in result_df.iterrows():
+            art = normalize_article(row.get("article"))
+            if art:
+                token_pool.append(art)
+            for code in row.get("name_code_list", []) or []:
+                norm = normalize_article(code)
+                if norm:
+                    token_pool.append(norm)
+
+    token_pool = unique_preserve_order(token_pool)
+    if not token_pool:
+        return pd.DataFrame()
+
+    matches: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for _, row in avito_df.iterrows():
+        codes = [normalize_article(x) for x in (row.get("title_codes", []) or []) if normalize_article(x)]
+        matched_tokens = [tok for tok in token_pool if tok in codes]
+
+        if not matched_tokens:
+            title_norm = str(row.get("title_norm", ""))
+            matched_tokens = [
+                tok for tok in token_pool
+                if tok and re.search(rf"(?<![A-ZА-Я0-9]){re.escape(tok)}(?![A-ZА-Я0-9])", title_norm)
+            ]
+
+        if matched_tokens:
+            key = str(row.get("row_key", "")) or str(row.get("ad_id", "")) or str(row.get("title", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            row_dict = dict(row)
+            row_dict["matched_tokens"] = unique_preserve_order(matched_tokens)
+            row_dict["match_score"] = len(row_dict["matched_tokens"])
+            row_dict["query_hit"] = any(tok in query_tokens for tok in row_dict["matched_tokens"])
+            matches.append(row_dict)
+
+    if not matches:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(matches)
+    out = out.sort_values(["query_hit", "match_score", "ad_id", "title"], ascending=[False, False, True, True]).reset_index(drop=True)
+    return out
 
 
 st.markdown(
@@ -957,6 +1138,20 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-title">Загрузить файл Авито</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-note">Файл с колонкой <b>Название объявления</b>. Ссылки читаются прямо из гиперссылок Excel.</div>', unsafe_allow_html=True)
+    avito_uploaded = st.file_uploader("Загрузить файл Авито", type=["xlsx", "xlsm", "csv"], key="avito_uploader", label_visibility="collapsed")
+    if avito_uploaded is not None:
+        try:
+            st.session_state.avito_df = load_avito_file(avito_uploaded.name, avito_uploaded.getvalue())
+            st.session_state.avito_name = avito_uploaded.name
+        except Exception as exc:
+            st.error(f"Ошибка файла Авито: {exc}")
+    avito_caption = st.session_state.get("avito_name", "ещё не загружен")
+    st.markdown(f'<div class="sidebar-status">Авито: {html.escape(avito_caption)}</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-card-title">Быстрая правка цен</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-card-note">Вставьте строки вида <b>CE278A 8900</b>, <b>CF364A - 29700</b> или прямо текст из Telegram.</div>', unsafe_allow_html=True)
     st.text_area(
@@ -970,9 +1165,7 @@ CF364A - 29700 🔽""",
     )
     if st.button("Править цены в прайсе", use_container_width=True):
         if isinstance(st.session_state.catalog_df, pd.DataFrame):
-            updated_df, patch_message = apply_price_updates(
-                st.session_state.catalog_df, st.session_state.price_patch_input
-            )
+            updated_df, patch_message = apply_price_updates(st.session_state.catalog_df, st.session_state.price_patch_input)
             st.session_state.catalog_df = updated_df
             st.session_state.patch_message = patch_message
             submitted_query = normalize_text(st.session_state.get("submitted_query", ""))
@@ -1009,6 +1202,7 @@ round100 = st.session_state.round100
 custom_discount = float(st.session_state.custom_discount)
 search_mode = st.session_state.search_mode
 price_label = current_price_label(price_mode, custom_discount)
+current_avito_df = st.session_state.get("avito_df")
 
 st.markdown(f"""
 <div class="topbar"><div class="topbar-grid">
@@ -1046,11 +1240,7 @@ if find_clicked:
     normalized_query = normalize_query_for_display(search_value)
     st.session_state.search_input = normalized_query
     st.session_state.submitted_query = normalized_query
-    st.session_state.last_result = (
-        perform_search(st.session_state.catalog_df, normalized_query, search_mode)
-        if isinstance(st.session_state.catalog_df, pd.DataFrame)
-        else None
-    )
+    st.session_state.last_result = perform_search(st.session_state.catalog_df, normalized_query, search_mode) if isinstance(st.session_state.catalog_df, pd.DataFrame) else None
     st.rerun()
 
 current_df = st.session_state.catalog_df
@@ -1079,7 +1269,36 @@ else:
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-# Блок серии / цветов по части артикула
+if isinstance(current_avito_df, pd.DataFrame) and not current_avito_df.empty and submitted_query.strip():
+    avito_matches = find_avito_ads(current_avito_df, submitted_query, result_df)
+    st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Объявления Авито по этой позиции</div><div class="section-sub">Ищу совпадения по введённым артикулам и связанным кодам найденной позиции. Если ссылка есть в Excel-гиперссылке, её можно открыть сразу.</div>', unsafe_allow_html=True)
+    if avito_matches.empty:
+        st.info("По текущему запросу объявление в файле Авито не найдено.")
+    else:
+        st.caption(f"Найдено объявлений: {len(avito_matches)}")
+        for _, row in avito_matches.head(20).iterrows():
+            with st.container(border=True):
+                c1, c2 = st.columns([5, 1.4])
+                with c1:
+                    st.markdown(f"**{normalize_text(row.get('title', 'Без названия'))}**")
+                    line = f"№ {normalize_text(row.get('ad_id', 'Без номера'))}"
+                    if normalize_text(row.get('price', '')):
+                        line += f" • Цена: {normalize_text(row.get('price', ''))}"
+                    st.caption(line)
+                    matched = ", ".join(row.get("matched_tokens", []) or [])
+                    if matched:
+                        st.caption("Совпали артикулы: " + matched)
+                with c2:
+                    if normalize_text(row.get("url", "")):
+                        try:
+                            st.link_button("Открыть объявление", str(row.get("url", "")), use_container_width=True)
+                        except Exception:
+                            st.markdown(f'<a href="{html.escape(str(row.get("url", "")), quote=True)}" target="_blank">Открыть объявление</a>', unsafe_allow_html=True)
+                    else:
+                        st.caption("Ссылка не найдена")
+    st.markdown('</div>', unsafe_allow_html=True)
+
 series_info = get_series_candidates(current_df, submitted_query, st.session_state.series_mode) if isinstance(current_df, pd.DataFrame) and submitted_query.strip() else {"prefix": "", "candidates": []}
 series_candidates = series_info.get("candidates", []) if isinstance(series_info, dict) else []
 
@@ -1088,14 +1307,12 @@ if current_df is not None and submitted_query.strip() and series_candidates:
     st.markdown('<div class="section-title">Серия / цвета по части артикула</div><div class="section-sub">Если по части артикула находится серия, можно быстро отметить нужные позиции и добавить их в основной поиск.</div>', unsafe_allow_html=True)
 
     st.radio("Режим серии", ["Только оригиналы", "Показывать всё"], key="series_mode", horizontal=True)
-    # Пересчитаем после возможного изменения режима
     series_info = get_series_candidates(current_df, submitted_query, st.session_state.series_mode)
     series_candidates = series_info.get("candidates", []) if isinstance(series_info, dict) else []
 
     if series_candidates:
         st.caption(f"По префиксу {series_info.get('prefix', '')} найдено позиций: {len(series_candidates)}")
 
-        # Кнопки управления выбором до рендера чекбоксов — иначе Streamlit ругается на session_state.
         c_add, c_all, c_clear = st.columns(3)
         select_all_clicked = c_all.button("Выбрать все", use_container_width=True, key=f"series_select_all_{normalize_article(str(series_info.get('prefix', '')))}")
         clear_all_clicked = c_clear.button("Очистить выбор", use_container_width=True, key=f"series_clear_all_{normalize_article(str(series_info.get('prefix', '')))}")
@@ -1110,7 +1327,6 @@ if current_df is not None and submitted_query.strip() and series_candidates:
                 st.session_state[f"series_pick_{cand['article_norm']}"] = False
             st.rerun()
 
-        # Визуальная группировка по семейству артикула (например W2030A/X/XH, потом W2031...)
         family_counts: dict[str, int] = {}
         for cand in series_candidates:
             family = group_label_for_article(str(cand["article_norm"]))
