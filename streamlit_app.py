@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import openpyxl
-from openpyxl import load_workbook
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -41,10 +40,10 @@ COLUMN_ALIASES = {
 }
 
 AVITO_COLUMN_ALIASES = {
-    "ad_id": ["Номер объявления", "ID объявления", "Номер", "ID"],
-    "title": ["Название объявления", "Название", "Заголовок"],
+    "ad_id": ["Номер объявления", "ID объявления", "Номер"],
+    "title": ["Название объявления", "Заголовок", "Название"],
     "price": ["Цена"],
-    "url": ["Ссылка", "URL", "Link", "Ссылка на объявление"],
+    "url": ["Ссылка", "URL", "Ссылка на объявление", "Link"],
 }
 
 COLOR_KEYWORDS = [
@@ -286,122 +285,109 @@ def load_price_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
 
 def parse_excel_hyperlink_formula(value: object) -> tuple[str, str]:
     text = str(value or "").strip()
-    m = re.match(
-        r'^\s*=\s*(?:HYPERLINK|ГИПЕРССЫЛКА)\(\s*"((?:[^"]|"")*)"\s*[,;]\s*"((?:[^"]|"")*)"\s*\)\s*$',
-        text,
-        flags=re.IGNORECASE,
-    )
+    if not text.startswith("="):
+        return "", ""
+    m = re.match(r'^=\s*(?:HYPERLINK|ГИПЕРССЫЛКА)\(\s*"([^"]+)"\s*[;,]\s*"([^"]*)"\s*\)$', text, flags=re.IGNORECASE)
     if not m:
         return "", ""
-    url = m.group(1).replace('""', '"').strip()
-    label = m.group(2).replace('""', '"').strip()
-    return url, label
+    return m.group(1).strip(), m.group(2).strip()
 
 
-def extract_excel_cell_display_and_url(cell) -> tuple[object, str]:
-    value = cell.value
-    if isinstance(value, str):
-        url, label = parse_excel_hyperlink_formula(value)
-        if url:
-            return label or "", url
-
+def cell_display_and_url(cell) -> tuple[str, str]:
+    url = ""
+    display = ""
+    if cell is None:
+        return display, url
     try:
-        if getattr(cell, "hyperlink", None) is not None:
-            target = getattr(cell.hyperlink, "target", "") or ""
-            return value, str(target).strip()
+        if getattr(cell, "hyperlink", None):
+            url = str(cell.hyperlink.target or "").strip()
     except Exception:
         pass
-
-    return value, ""
+    formula_url, formula_display = parse_excel_hyperlink_formula(cell.value)
+    if formula_url:
+        url = formula_url
+        display = formula_display
+    else:
+        display = normalize_text(cell.value)
+    return display, url
 
 
 @st.cache_data(show_spinner=False)
 def load_avito_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     suffix = Path(file_name).suffix.lower()
 
-    if suffix in [".xlsx", ".xlsm", ".xltx", ".xltm"]:
-        workbook = load_workbook(io.BytesIO(file_bytes), data_only=False, read_only=False)
-        worksheet = workbook.active
-
-        headers: list[str] = []
-        for idx in range(1, worksheet.max_column + 1):
-            header_val, _ = extract_excel_cell_display_and_url(worksheet.cell(1, idx))
-            header_text = normalize_text(header_val) if header_val is not None else f"Unnamed:{idx}"
-            headers.append(header_text or f"Unnamed:{idx}")
-
-        rows: list[dict[str, object]] = []
-        for row_idx in range(2, worksheet.max_row + 1):
-            record: dict[str, object] = {}
-            has_any_value = False
-            for col_idx, header in enumerate(headers, start=1):
-                display, url = extract_excel_cell_display_and_url(worksheet.cell(row_idx, col_idx))
-                if display not in (None, ""):
-                    has_any_value = True
-                record[header] = display
-                if url:
-                    record[f"__url__{header}"] = url
-            if has_any_value:
-                rows.append(record)
-
-        raw = pd.DataFrame(rows)
-    else:
+    if suffix == ".csv":
         bio = io.BytesIO(file_bytes)
-        if suffix == ".csv":
-            try:
-                raw = pd.read_csv(bio)
-            except UnicodeDecodeError:
-                bio.seek(0)
-                raw = pd.read_csv(bio, encoding="cp1251")
-        else:
-            raw = pd.read_excel(bio)
+        try:
+            raw = pd.read_csv(bio)
+        except UnicodeDecodeError:
+            bio.seek(0)
+            raw = pd.read_csv(bio, encoding="cp1251")
 
-    raw = raw.dropna(how="all")
-    mapping = {key: find_column(list(raw.columns), aliases) for key, aliases in AVITO_COLUMN_ALIASES.items()}
-    if not mapping.get("title"):
-        raise ValueError("Не удалось определить колонку 'Название объявления'.")
+        mapping = {key: find_column(list(raw.columns), aliases) for key, aliases in AVITO_COLUMN_ALIASES.items()}
+        if not mapping.get("title"):
+            raise ValueError("Не удалось определить колонку 'Название объявления' в файле Авито.")
+        rows = []
+        for _, r in raw.iterrows():
+            ad_id = normalize_text(r[mapping["ad_id"]]) if mapping.get("ad_id") else ""
+            title = normalize_text(r[mapping["title"]]) if mapping.get("title") else ""
+            url = normalize_text(r[mapping["url"]]) if mapping.get("url") else ""
+            price = normalize_text(r[mapping["price"]]) if mapping.get("price") else ""
+            if not ad_id and not title:
+                continue
+            rows.append({
+                "ad_id": ad_id,
+                "title": title,
+                "price": price,
+                "url": url,
+                "title_codes": extract_article_candidates_from_text(title),
+                "title_norm": normalize_text(title).upper(),
+            })
+        return pd.DataFrame(rows)
 
-    ad_id_col = mapping.get("ad_id")
-    title_col = mapping.get("title")
-    price_col = mapping.get("price")
-    url_col = mapping.get("url")
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
+    ws = wb.active
+    headers = [normalize_text(ws.cell(1, c).value) for c in range(1, ws.max_column + 1)]
 
-    result = pd.DataFrame()
-    result["ad_id"] = raw[ad_id_col] if ad_id_col else ""
-    result["title"] = raw[title_col] if title_col else ""
-    result["price"] = raw[price_col] if price_col else ""
-    result["url"] = raw[url_col] if url_col else ""
+    def find_header_index(candidates: list[str]) -> Optional[int]:
+        for idx, header in enumerate(headers, start=1):
+            for cand in candidates:
+                if header.lower() == cand.lower():
+                    return idx
+        for idx, header in enumerate(headers, start=1):
+            h = header.lower()
+            for cand in candidates:
+                c = cand.lower()
+                if c in h or h in c:
+                    return idx
+        return None
 
-    ad_id_url_col = f"__url__{ad_id_col}" if ad_id_col and f"__url__{ad_id_col}" in raw.columns else None
-    title_url_col = f"__url__{title_col}" if title_col and f"__url__{title_col}" in raw.columns else None
+    ad_id_col = find_header_index(AVITO_COLUMN_ALIASES["ad_id"])
+    title_col = find_header_index(AVITO_COLUMN_ALIASES["title"])
+    price_col = find_header_index(AVITO_COLUMN_ALIASES["price"])
+    url_col = find_header_index(AVITO_COLUMN_ALIASES["url"])
 
-    def norm_ad_id(value: object) -> str:
-        if value is None:
-            return ""
-        text = str(value).strip()
-        if not text or text.lower() == "nan":
-            return ""
-        if re.fullmatch(r"\d+\.0", text):
-            text = text[:-2]
-        return text
+    if not title_col:
+        raise ValueError("Не удалось определить колонку 'Название объявления' в файле Авито.")
 
-    result["ad_id"] = result["ad_id"].apply(norm_ad_id)
-    result["title"] = result["title"].fillna("").astype(str).str.strip()
-    result["price"] = result["price"].fillna("").astype(str).str.strip()
-    result["url"] = result["url"].fillna("").astype(str).str.strip()
-
-    if ad_id_url_col:
-        ad_urls = raw[ad_id_url_col].fillna("").astype(str).str.strip()
-        result.loc[result["url"] == "", "url"] = ad_urls[result["url"] == ""]
-    if title_url_col:
-        title_urls = raw[title_url_col].fillna("").astype(str).str.strip()
-        result.loc[result["url"] == "", "url"] = title_urls[result["url"] == ""]
-
-    result["title_norm"] = result["title"].apply(lambda x: normalize_text(x).upper())
-    result["title_codes"] = result["title"].apply(extract_article_candidates_from_text)
-    result["row_key"] = result.apply(lambda r: norm_ad_id(r["ad_id"]) or normalize_text(r["title"]).upper()[:120], axis=1)
-    result = result[result["title"] != ""].copy()
-    result.reset_index(drop=True, inplace=True)
-    return result
+    rows: list[dict[str, object]] = []
+    for r in range(2, ws.max_row + 1):
+        ad_display, ad_url = cell_display_and_url(ws.cell(r, ad_id_col)) if ad_id_col else ("", "")
+        title_display, title_url = cell_display_and_url(ws.cell(r, title_col))
+        explicit_url = normalize_text(ws.cell(r, url_col).value) if url_col else ""
+        price_value = normalize_text(ws.cell(r, price_col).value) if price_col else ""
+        final_url = explicit_url or title_url or ad_url
+        if not ad_display and not title_display:
+            continue
+        rows.append({
+            "ad_id": ad_display,
+            "title": title_display,
+            "price": price_value,
+            "url": final_url,
+            "title_codes": extract_article_candidates_from_text(title_display),
+            "title_norm": normalize_text(title_display).upper(),
+        })
+    return pd.DataFrame(rows)
 
 
 def round_up_to_100(value: float) -> int:
@@ -538,7 +524,6 @@ def apply_price_updates(df: pd.DataFrame, updates_text: str) -> tuple[pd.DataFra
     for article_norm, new_price in updates:
         if article_norm in seen_done:
             continue
-
         mask = out["article_norm"] == article_norm
         match_source = "exact"
         if not mask.any():
@@ -549,7 +534,6 @@ def apply_price_updates(df: pd.DataFrame, updates_text: str) -> tuple[pd.DataFra
                     chosen = safe_linked.iloc[0]
                     mask = out["article_norm"] == str(chosen["article_norm"])
                     match_source = "linked"
-
         if mask.any():
             out.loc[mask, "sale_price"] = float(new_price)
             out.loc[mask, "price_12"] = float(new_price) * (1 - DEFAULT_DISCOUNT_1 / 100)
@@ -561,7 +545,6 @@ def apply_price_updates(df: pd.DataFrame, updates_text: str) -> tuple[pd.DataFra
                 linked_hits.append(f"{article_norm}→{first_row['article']}")
         else:
             missed.append(article_norm)
-
     message = f"Обновлено цен: {updated_count}"
     if linked_hits:
         message += " | Связанные: " + ", ".join(linked_hits[:8])
@@ -574,13 +557,11 @@ def find_best_row_for_token(df: pd.DataFrame, token: str, search_mode: str) -> t
     article_norm = normalize_article(token)
     if not article_norm:
         return None, ""
-
     exact = df[df["article_norm"] == article_norm]
     if not exact.empty:
         exact_safe = exact[~exact.apply(is_negative_substitute_row, axis=1)]
         chosen = exact_safe.iloc[0] if not exact_safe.empty else exact.iloc[0]
         return chosen, "exact"
-
     name_matches = df[df["name_tokens"].map(lambda toks: article_norm in toks)]
     if not name_matches.empty:
         safe_name_matches = name_matches[~name_matches.apply(is_negative_substitute_row, axis=1)]
@@ -588,7 +569,6 @@ def find_best_row_for_token(df: pd.DataFrame, token: str, search_mode: str) -> t
             chosen = safe_name_matches.iloc[0]
             return chosen, "linked"
         return None, ""
-
     if search_mode in {"Умный", "Артикул + название + бренд"}:
         contains = df[df["search_blob"].str.contains(re.escape(token.upper()), na=False)]
         if not contains.empty:
@@ -597,7 +577,6 @@ def find_best_row_for_token(df: pd.DataFrame, token: str, search_mode: str) -> t
                 chosen = safe_contains.iloc[0]
                 return chosen, "similar"
             return None, ""
-
     return None, ""
 
 
@@ -617,11 +596,9 @@ def perform_search(df: pd.DataFrame, query: str, search_mode: str) -> pd.DataFra
     resolved, _ = resolve_query_tokens(df, query, search_mode)
     if not resolved:
         return df.iloc[0:0].copy()
-
     rows = []
     seen_articles: set[str] = set()
     rank_map = {"exact": 0, "linked": 1, "similar": 2}
-
     for part, row, match_type in resolved:
         article_key = str(row["article_norm"])
         if article_key in seen_articles:
@@ -632,7 +609,6 @@ def perform_search(df: pd.DataFrame, query: str, search_mode: str) -> pd.DataFra
         row_dict["match_query"] = part
         row_dict["_rank"] = rank_map.get(match_type, 99)
         rows.append(row_dict)
-
     out = pd.DataFrame(rows).sort_values(["_rank", "article_norm"]).drop(columns=["_rank"]).reset_index(drop=True)
     return out
 
@@ -664,34 +640,23 @@ def build_offer_template(df: pd.DataFrame, query: str, round100: bool, footer_te
     parts = split_query_parts(query)
     if not parts:
         return ""
-
     groups: dict[str, dict] = {}
     missing_tokens: list[str] = []
-
     for part in parts:
         row, _ = find_best_row_for_token(df, part, search_mode)
         if row is None:
             missing_tokens.append(part)
             continue
         key = str(row["article_norm"])
-        grp = groups.setdefault(
-            key,
-            {
-                "row": row,
-                "tokens": [],
-            },
-        )
+        grp = groups.setdefault(key, {"row": row, "tokens": []})
         grp["tokens"].append(part)
-
     lines: list[str] = []
     hashtag_parts: list[str] = []
-
     for item in groups.values():
         row = item["row"]
         tokens = unique_preserve_order([normalize_article(t) for t in item["tokens"] if normalize_article(t)])
         if not tokens:
             tokens = [str(row["article_norm"])]
-
         if is_available(row):
             avito_raw = float(row["sale_price"]) * (1 - DEFAULT_DISCOUNT_1 / 100)
             cash_raw = avito_raw * 0.90
@@ -706,16 +671,13 @@ def build_offer_template(df: pd.DataFrame, query: str, round100: bool, footer_te
             color = detect_color(str(row["name"]))
             prefix = f"{row['article']} {color}".strip()
             head = f"{prefix} --- продан"
-
         lines.append(head)
         hashtag_parts.extend([f"#{t}" for t in tokens])
-
     for token in missing_tokens:
         lines.append(f"{token} --- продан")
         tok = normalize_article(token)
         if tok:
             hashtag_parts.append(f"#{tok}")
-
     hashtag_parts = unique_preserve_order(hashtag_parts)
     footer = compact_multiline(footer_text)
     out_lines = [line for line in lines if normalize_text(line)]
@@ -723,7 +685,6 @@ def build_offer_template(df: pd.DataFrame, query: str, round100: bool, footer_te
         out_lines.extend(footer.split("\n"))
     if hashtag_parts:
         out_lines.append(",".join(hashtag_parts))
-
     return "\n".join(out_lines)
 
 
@@ -742,6 +703,61 @@ def build_selected_price_template(df: pd.DataFrame, query: str, price_mode: str,
         selected_price = get_selected_price_raw(row, price_mode, round100, custom_discount)
         lines.append(f"{normalize_text(row['name'])} --- {fmt_price_with_rub(selected_price)}")
     return "\n\n".join(lines)
+
+
+def find_avito_ads(avito_df: pd.DataFrame, query: str, result_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    if avito_df is None or avito_df.empty:
+        return pd.DataFrame()
+    query_tokens = unique_preserve_order([normalize_article(x) for x in split_query_parts(query) if normalize_article(x)])
+    token_pool = list(query_tokens)
+    if isinstance(result_df, pd.DataFrame) and not result_df.empty:
+        for _, row in result_df.iterrows():
+            art = normalize_article(row.get("article"))
+            if art:
+                token_pool.append(art)
+            for code in row.get("name_code_list", []) or []:
+                norm = normalize_article(code)
+                if norm:
+                    token_pool.append(norm)
+    token_pool = unique_preserve_order(token_pool)
+    if not token_pool:
+        return pd.DataFrame()
+    matches: list[dict[str, object]] = []
+    for _, row in avito_df.iterrows():
+        codes = [normalize_article(x) for x in (row.get("title_codes", []) or []) if normalize_article(x)]
+        matched_tokens = [tok for tok in token_pool if tok in codes]
+        match_kind = ""
+        if matched_tokens:
+            match_kind = "exact" if any(tok in query_tokens for tok in matched_tokens) else "related"
+        else:
+            title_norm = str(row.get("title_norm", ""))
+            boundary_hits = [tok for tok in token_pool if tok and re.search(rf"(?<![A-ZА-Я0-9]){re.escape(tok)}(?![A-ZА-Я0-9])", title_norm)]
+            if boundary_hits:
+                matched_tokens = boundary_hits
+                match_kind = "exact" if any(tok in query_tokens for tok in matched_tokens) else "related"
+        if matched_tokens:
+            row_dict = dict(row)
+            row_dict["matched_tokens"] = unique_preserve_order(matched_tokens)
+            row_dict["match_score"] = len(row_dict["matched_tokens"])
+            row_dict["match_kind"] = match_kind or "related"
+            matches.append(row_dict)
+    if not matches:
+        return pd.DataFrame()
+    out = pd.DataFrame(matches)
+    rank = {"exact": 0, "related": 1}
+    out["_rank"] = out["match_kind"].map(lambda x: rank.get(str(x), 99))
+    out = out.sort_values(["_rank", "match_score", "ad_id", "title"], ascending=[True, False, True, True]).drop(columns=["_rank"]).reset_index(drop=True)
+    return out
+
+
+def render_avito_open_button(url: str, label: str = "Открыть объявление") -> None:
+    if not normalize_text(url):
+        st.caption("Ссылка не найдена")
+        return
+    try:
+        st.link_button(label, url, use_container_width=True)
+    except Exception:
+        st.markdown(f'<a href="{html.escape(url, quote=True)}" target="_blank">{html.escape(label)}</a>', unsafe_allow_html=True)
 
 
 def render_copy_big_button(text_value: str, button_label: str = "📋 Скопировать весь шаблон") -> None:
@@ -780,7 +796,7 @@ def render_results_table(df: pd.DataFrame, price_mode: str, round100: bool, cust
               <td>{fmt_qty(row['total_qty'])}</td>
               <td class='sale-col'>{fmt_price(row['sale_price'])} руб.</td>
               <td class='selected-col'>{selected_fmt}</td>
-              <td><button class='copy-btn' onclick=\"navigator.clipboard.writeText('{selected_fmt}').then(() => {{ this.innerText = 'Скопировано'; setTimeout(() => this.innerText = 'Копировать цену', 1200); }})\">Копировать цену</button></td>
+              <td><button class='copy-btn' onclick="navigator.clipboard.writeText('{selected_fmt}').then(() => {{ this.innerText = 'Скопировано'; setTimeout(() => this.innerText = 'Копировать цену', 1200); }})">Копировать цену</button></td>
             </tr>
             """
         )
@@ -838,14 +854,11 @@ def get_series_candidates(df: pd.DataFrame, raw_query: str, series_mode: str = "
     tokens = split_query_parts(raw_query)
     if len(tokens) != 1:
         return {"prefix": "", "candidates": []}
-
     token = tokens[0]
     token_norm = normalize_article(token)
     if len(token_norm) < 4:
         return {"prefix": token, "candidates": []}
-
     candidates_by_key: dict[str, dict[str, object]] = {}
-
     direct_df = df[df["article_norm"].str.startswith(token_norm, na=False)].copy()
     for _, row in direct_df.iterrows():
         candidate = {
@@ -858,7 +871,6 @@ def get_series_candidates(df: pd.DataFrame, raw_query: str, series_mode: str = "
             "is_original": not row_has_negative_series_markers(row),
         }
         candidates_by_key[candidate["article_norm"]] = candidate
-
     linked_mask = df["name_code_list"].apply(lambda codes: any(str(code).startswith(token_norm) for code in codes))
     linked_df = df[linked_mask].copy()
     for _, row in linked_df.iterrows():
@@ -873,71 +885,15 @@ def get_series_candidates(df: pd.DataFrame, raw_query: str, series_mode: str = "
         }
         if candidate["article_norm"] not in candidates_by_key:
             candidates_by_key[candidate["article_norm"]] = candidate
-
     candidates = list(candidates_by_key.values())
     if series_mode != "Показывать всё":
         original_candidates = [c for c in candidates if bool(c.get("is_original", True))]
         if original_candidates:
             candidates = original_candidates
-
     candidates.sort(key=series_sort_key)
     if len(candidates) < 2:
         return {"prefix": token, "candidates": []}
-
     return {"prefix": token, "candidates": candidates}
-
-
-def find_avito_ads(avito_df: pd.DataFrame, query: str, result_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-    if avito_df is None or avito_df.empty:
-        return pd.DataFrame()
-
-    query_tokens = unique_preserve_order([normalize_article(x) for x in split_query_parts(query) if normalize_article(x)])
-    token_pool = list(query_tokens)
-
-    if isinstance(result_df, pd.DataFrame) and not result_df.empty:
-        for _, row in result_df.iterrows():
-            art = normalize_article(row.get("article"))
-            if art:
-                token_pool.append(art)
-            for code in row.get("name_code_list", []) or []:
-                norm = normalize_article(code)
-                if norm:
-                    token_pool.append(norm)
-
-    token_pool = unique_preserve_order(token_pool)
-    if not token_pool:
-        return pd.DataFrame()
-
-    matches: list[dict[str, object]] = []
-    seen: set[str] = set()
-    for _, row in avito_df.iterrows():
-        codes = [normalize_article(x) for x in (row.get("title_codes", []) or []) if normalize_article(x)]
-        matched_tokens = [tok for tok in token_pool if tok in codes]
-
-        if not matched_tokens:
-            title_norm = str(row.get("title_norm", ""))
-            matched_tokens = [
-                tok for tok in token_pool
-                if tok and re.search(rf"(?<![A-ZА-Я0-9]){re.escape(tok)}(?![A-ZА-Я0-9])", title_norm)
-            ]
-
-        if matched_tokens:
-            key = str(row.get("row_key", "")) or str(row.get("ad_id", "")) or str(row.get("title", ""))
-            if key in seen:
-                continue
-            seen.add(key)
-            row_dict = dict(row)
-            row_dict["matched_tokens"] = unique_preserve_order(matched_tokens)
-            row_dict["match_score"] = len(row_dict["matched_tokens"])
-            row_dict["query_hit"] = any(tok in query_tokens for tok in row_dict["matched_tokens"])
-            matches.append(row_dict)
-
-    if not matches:
-        return pd.DataFrame()
-
-    out = pd.DataFrame(matches)
-    out = out.sort_values(["query_hit", "match_score", "ad_id", "title"], ascending=[False, False, True, True]).reset_index(drop=True)
-    return out
 
 
 st.markdown(
@@ -947,152 +903,29 @@ st.markdown(
     header[data-testid="stHeader"] { background: rgba(0,0,0,0); }
     [data-testid="stDecoration"] { display: none; }
     .block-container { max-width: 1560px; padding-top: 3.4rem; padding-bottom: 1.2rem; }
-
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #08122f 0%, #102358 55%, #172a63 100%);
-        border-right: 1px solid rgba(255,255,255,.08);
-    }
+    [data-testid="stSidebar"] { background: linear-gradient(180deg, #08122f 0%, #102358 55%, #172a63 100%); border-right: 1px solid rgba(255,255,255,.08); }
     [data-testid="stSidebar"] * { color: #e9efff !important; }
-
-    .sidebar-brand {
-        display:flex; align-items:center; gap:12px;
-        margin: 0.15rem 0 0.95rem 0;
-        padding: 0.15rem 0.1rem 0.35rem 0.1rem;
-    }
-    .sidebar-brand-logo {
-        width:44px; height:44px; border-radius:14px;
-        background: linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.08));
-        display:flex; align-items:center; justify-content:center;
-        box-shadow: inset 0 1px 0 rgba(255,255,255,.15);
-        font-size:22px;
-    }
+    .sidebar-brand { display:flex; align-items:center; gap:12px; margin: 0.15rem 0 0.95rem 0; padding: 0.15rem 0.1rem 0.35rem 0.1rem; }
+    .sidebar-brand-logo { width:44px; height:44px; border-radius:14px; background: linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.08)); display:flex; align-items:center; justify-content:center; box-shadow: inset 0 1px 0 rgba(255,255,255,.15); font-size:22px; }
     .sidebar-brand-title { font-size: 1.22rem; font-weight: 900; line-height:1.05; color:#ffffff !important; }
     .sidebar-brand-sub { font-size: .82rem; color: #c7d6ff !important; margin-top: 4px; }
-
-    .sidebar-card {
-        background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.04));
-        border: 1px solid rgba(255,255,255,.12);
-        border-radius: 20px;
-        padding: 1rem 0.95rem 0.95rem 0.95rem;
-        margin: 0.95rem 0 1.05rem 0;
-        box-shadow: 0 10px 22px rgba(2, 8, 23, .22), inset 0 1px 0 rgba(255,255,255,.05);
-    }
-    .sidebar-card-title {
-        font-size: 1.02rem; font-weight: 900; color:#ffffff !important; margin-bottom: .45rem;
-    }
-    .sidebar-card-note {
-        font-size: .78rem; line-height: 1.45; color:#c7d6ff !important; margin-bottom: .6rem;
-    }
-    .sidebar-status {
-        background: rgba(7, 31, 74, .9);
-        border: 1px solid rgba(255,255,255,.06);
-        border-radius: 14px;
-        padding: .72rem .78rem;
-        color:#ffffff !important;
-        font-weight: 800;
-        margin-top: .55rem;
-    }
+    .sidebar-card { background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.04)); border: 1px solid rgba(255,255,255,.12); border-radius: 20px; padding: 1rem 0.95rem 0.95rem 0.95rem; margin: 0.95rem 0 1.05rem 0; box-shadow: 0 10px 22px rgba(2, 8, 23, .22), inset 0 1px 0 rgba(255,255,255,.05); }
+    .sidebar-card-title { font-size: 1.02rem; font-weight: 900; color:#ffffff !important; margin-bottom: .45rem; }
+    .sidebar-card-note { font-size: .78rem; line-height: 1.45; color:#c7d6ff !important; margin-bottom: .6rem; }
+    .sidebar-status { background: rgba(7, 31, 74, .9); border: 1px solid rgba(255,255,255,.06); border-radius: 14px; padding: .72rem .78rem; color:#ffffff !important; font-weight: 800; margin-top: .55rem; }
     .sidebar-mini { font-size:.78rem; color:#c7d6ff !important; line-height:1.45; margin-top:.65rem; }
-
-    [data-testid="stSidebar"] .stFileUploader section {
-        background: rgba(255,255,255,0.03) !important;
-        border: 1px dashed rgba(255,255,255,0.22) !important;
-        border-radius: 16px !important;
-        padding: 0.6rem !important;
-    }
-    [data-testid="stSidebar"] .stFileUploader button,
-    [data-testid="stSidebar"] .stFileUploader button[kind],
-    [data-testid="stSidebar"] .stFileUploader [data-testid="stFileUploaderDropzone"] button,
-    [data-testid="stSidebar"] .stFileUploader [data-testid="baseButton-secondary"],
-    [data-testid="stSidebar"] .stFileUploader [data-baseweb="button"] {
-        background: linear-gradient(180deg, #3767ff 0%, #2455ef 100%) !important;
-        color: #ffffff !important;
-        -webkit-text-fill-color: #ffffff !important;
-        border: none !important;
-        border-radius: 14px !important;
-        font-weight: 800 !important;
-        opacity: 1 !important;
-        box-shadow: 0 10px 20px rgba(49, 94, 251, 0.30) !important;
-    }
-    [data-testid="stSidebar"] .stFileUploader small,
-    [data-testid="stSidebar"] .stFileUploader span,
-    [data-testid="stSidebar"] .stFileUploader label {
-        color: #dbe6ff !important;
-        -webkit-text-fill-color: #dbe6ff !important;
-        opacity: 1 !important;
-    }
-    [data-testid="stSidebar"] .stButton > button,
-    [data-testid="stSidebar"] .stDownloadButton > button {
-        width: 100% !important;
-        min-height: 48px !important;
-        background: linear-gradient(180deg, #3767ff 0%, #2455ef 100%) !important;
-        color: #ffffff !important;
-        border: none !important;
-        border-radius: 16px !important;
-        font-weight: 900 !important;
-        font-size: 1rem !important;
-        box-shadow: 0 10px 20px rgba(49, 94, 251, 0.30) !important;
-    }
-    [data-testid="stSidebar"] .stButton > button:hover,
-    [data-testid="stSidebar"] .stDownloadButton > button:hover {
-        background: linear-gradient(180deg, #4673ff 0%, #2a5cf2 100%) !important;
-        color: #ffffff !important;
-    }
-    [data-testid="stSidebar"] .stButton > button:disabled,
-    [data-testid="stSidebar"] .stDownloadButton > button:disabled {
-        background: #5f6f96 !important;
-        color: #edf2ff !important;
-        opacity: .84 !important;
-        box-shadow: none !important;
-    }
-    [data-testid="stSidebar"] .stNumberInput input,
-    [data-testid="stSidebar"] .stTextInput input,
-    [data-testid="stSidebar"] .stTextArea textarea,
-    [data-testid="stSidebar"] [data-baseweb="textarea"] textarea,
-    [data-testid="stSidebar"] [data-baseweb="input"] input,
-    [data-testid="stSidebar"] [data-baseweb="base-input"] input,
-    [data-testid="stSidebar"] [data-baseweb="select"] > div {
-        background: #ffffff !important;
-        color: #0f172a !important;
-        -webkit-text-fill-color: #0f172a !important;
-        caret-color: #0f172a !important;
-        border-radius: 16px !important;
-        border: none !important;
-        box-shadow: inset 0 0 0 1px #dbe4f3 !important;
-    }
+    [data-testid="stSidebar"] .stFileUploader section { background: rgba(255,255,255,0.03) !important; border: 1px dashed rgba(255,255,255,0.22) !important; border-radius: 16px !important; padding: 0.6rem !important; }
+    [data-testid="stSidebar"] .stFileUploader button, [data-testid="stSidebar"] .stFileUploader button[kind], [data-testid="stSidebar"] .stFileUploader [data-testid="stFileUploaderDropzone"] button, [data-testid="stSidebar"] .stFileUploader [data-testid="baseButton-secondary"], [data-testid="stSidebar"] .stFileUploader [data-baseweb="button"] { background: linear-gradient(180deg, #3767ff 0%, #2455ef 100%) !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; border: none !important; border-radius: 14px !important; font-weight: 800 !important; opacity: 1 !important; box-shadow: 0 10px 20px rgba(49, 94, 251, 0.30) !important; }
+    [data-testid="stSidebar"] .stFileUploader small, [data-testid="stSidebar"] .stFileUploader span, [data-testid="stSidebar"] .stFileUploader label { color: #dbe6ff !important; -webkit-text-fill-color: #dbe6ff !important; opacity: 1 !important; }
+    [data-testid="stSidebar"] .stButton > button, [data-testid="stSidebar"] .stDownloadButton > button { width: 100% !important; min-height: 48px !important; background: linear-gradient(180deg, #3767ff 0%, #2455ef 100%) !important; color: #ffffff !important; border: none !important; border-radius: 16px !important; font-weight: 900 !important; font-size: 1rem !important; box-shadow: 0 10px 20px rgba(49, 94, 251, 0.30) !important; }
+    [data-testid="stSidebar"] .stButton > button:hover, [data-testid="stSidebar"] .stDownloadButton > button:hover { background: linear-gradient(180deg, #4673ff 0%, #2a5cf2 100%) !important; color: #ffffff !important; }
+    [data-testid="stSidebar"] .stButton > button:disabled, [data-testid="stSidebar"] .stDownloadButton > button:disabled { background: #5f6f96 !important; color: #edf2ff !important; opacity: .84 !important; box-shadow: none !important; }
+    [data-testid="stSidebar"] .stNumberInput input, [data-testid="stSidebar"] .stTextInput input, [data-testid="stSidebar"] .stTextArea textarea, [data-testid="stSidebar"] [data-baseweb="textarea"] textarea, [data-testid="stSidebar"] [data-baseweb="input"] input, [data-testid="stSidebar"] [data-baseweb="base-input"] input, [data-testid="stSidebar"] [data-baseweb="select"] > div { background: #ffffff !important; color: #0f172a !important; -webkit-text-fill-color: #0f172a !important; caret-color: #0f172a !important; border-radius: 16px !important; border: none !important; box-shadow: inset 0 0 0 1px #dbe4f3 !important; }
     [data-testid="stSidebar"] .stTextArea textarea { line-height: 1.55 !important; }
-    [data-testid="stSidebar"] .stTextArea textarea::placeholder,
-    [data-testid="stSidebar"] [data-baseweb="textarea"] textarea::placeholder,
-    [data-testid="stSidebar"] .stNumberInput input::placeholder,
-    [data-testid="stSidebar"] .stTextInput input::placeholder {
-        color: #7b8798 !important;
-        -webkit-text-fill-color: #7b8798 !important;
-        opacity: 1 !important;
-    }
-    [data-testid="stSidebar"] .stNumberInput button,
-    [data-testid="stSidebar"] .stNumberInput [data-baseweb="button"],
-    [data-testid="stSidebar"] .stNumberInput button svg,
-    [data-testid="stSidebar"] .stNumberInput [data-baseweb="button"] svg {
-        background: #edf3ff !important;
-        color: #1d4ed8 !important;
-        fill: #1d4ed8 !important;
-        stroke: #1d4ed8 !important;
-        border-color: #d9e4ff !important;
-        opacity: 1 !important;
-    }
-    [data-testid="stSidebar"] .stRadio > label,
-    [data-testid="stSidebar"] .stSelectbox > label,
-    [data-testid="stSidebar"] .stCheckbox > label,
-    [data-testid="stSidebar"] .stNumberInput > label,
-    [data-testid="stSidebar"] .stTextArea > label,
-    [data-testid="stSidebar"] .stFileUploader > label {
-        color:#ffffff !important;
-        font-weight: 800 !important;
-        font-size: .92rem !important;
-    }
-    [data-testid="stSidebar"] .stCheckbox p,
-    [data-testid="stSidebar"] .stRadio p { color:#eef3ff !important; }
-
+    [data-testid="stSidebar"] .stTextArea textarea::placeholder, [data-testid="stSidebar"] [data-baseweb="textarea"] textarea::placeholder, [data-testid="stSidebar"] .stNumberInput input::placeholder, [data-testid="stSidebar"] .stTextInput input::placeholder { color: #7b8798 !important; -webkit-text-fill-color: #7b8798 !important; opacity: 1 !important; }
+    [data-testid="stSidebar"] .stNumberInput button, [data-testid="stSidebar"] .stNumberInput [data-baseweb="button"], [data-testid="stSidebar"] .stNumberInput button svg, [data-testid="stSidebar"] .stNumberInput [data-baseweb="button"] svg { background: #edf3ff !important; color: #1d4ed8 !important; fill: #1d4ed8 !important; stroke: #1d4ed8 !important; border-color: #d9e4ff !important; opacity: 1 !important; }
+    [data-testid="stSidebar"] .stRadio > label, [data-testid="stSidebar"] .stSelectbox > label, [data-testid="stSidebar"] .stCheckbox > label, [data-testid="stSidebar"] .stNumberInput > label, [data-testid="stSidebar"] .stTextArea > label, [data-testid="stSidebar"] .stFileUploader > label { color:#ffffff !important; font-weight: 800 !important; font-size: .92rem !important; }
+    [data-testid="stSidebar"] .stCheckbox p, [data-testid="stSidebar"] .stRadio p { color:#eef3ff !important; }
     .topbar { background: linear-gradient(90deg, #0f172a 0%, #1d4ed8 100%); color: white; padding: 16px 18px; border-radius: 18px; margin-top: 0.4rem; margin-bottom: 10px; box-shadow: 0 12px 28px rgba(15, 23, 42, .18); }
     .topbar-grid { display:grid; grid-template-columns: 1.6fr 1fr 1fr 1fr; gap: 10px; align-items:center; }
     .brand-box { display:flex; gap:12px; align-items:center; }
@@ -1139,7 +972,7 @@ with st.sidebar:
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-card-title">Загрузить файл Авито</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-card-note">Файл с колонкой <b>Название объявления</b>. Ссылки читаются прямо из гиперссылок Excel.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-note">Файл с колонкой <b>Название объявления</b>. Ссылки можно читать прямо из гиперссылок Excel.</div>', unsafe_allow_html=True)
     avito_uploaded = st.file_uploader("Загрузить файл Авито", type=["xlsx", "xlsm", "csv"], key="avito_uploader", label_visibility="collapsed")
     if avito_uploaded is not None:
         try:
@@ -1202,7 +1035,6 @@ round100 = st.session_state.round100
 custom_discount = float(st.session_state.custom_discount)
 search_mode = st.session_state.search_mode
 price_label = current_price_label(price_mode, custom_discount)
-current_avito_df = st.session_state.get("avito_df")
 
 st.markdown(f"""
 <div class="topbar"><div class="topbar-grid">
@@ -1240,7 +1072,7 @@ if find_clicked:
     normalized_query = normalize_query_for_display(search_value)
     st.session_state.search_input = normalized_query
     st.session_state.submitted_query = normalized_query
-    st.session_state.last_result = perform_search(st.session_state.catalog_df, normalized_query, search_mode) if isinstance(st.session_state.catalog_df, pd.DataFrame) else None
+    st.session_state.last_result = (perform_search(st.session_state.catalog_df, normalized_query, search_mode) if isinstance(st.session_state.catalog_df, pd.DataFrame) else None)
     st.rerun()
 
 current_df = st.session_state.catalog_df
@@ -1269,87 +1101,82 @@ else:
 
 st.markdown('</div>', unsafe_allow_html=True)
 
+current_avito_df = st.session_state.get("avito_df")
 if isinstance(current_avito_df, pd.DataFrame) and not current_avito_df.empty and submitted_query.strip():
     avito_matches = find_avito_ads(current_avito_df, submitted_query, result_df)
     st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">Объявления Авито по этой позиции</div><div class="section-sub">Ищу совпадения по введённым артикулам и связанным кодам найденной позиции. Если ссылка есть в Excel-гиперссылке, её можно открыть сразу.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Объявления Авито по этой позиции</div><div class="section-sub">Ищу совпадения по введённым артикулам и связанным кодам из найденной позиции. Ссылки читаются прямо из гиперссылок Excel.</div>', unsafe_allow_html=True)
     if avito_matches.empty:
         st.info("По текущему запросу объявление в файле Авито не найдено.")
     else:
-        st.caption(f"Найдено объявлений: {len(avito_matches)}")
-        for _, row in avito_matches.head(20).iterrows():
-            with st.container(border=True):
-                c1, c2 = st.columns([5, 1.4])
-                with c1:
-                    st.markdown(f"**{normalize_text(row.get('title', 'Без названия'))}**")
-                    line = f"№ {normalize_text(row.get('ad_id', 'Без номера'))}"
-                    if normalize_text(row.get('price', '')):
-                        line += f" • Цена: {normalize_text(row.get('price', ''))}"
-                    st.caption(line)
-                    matched = ", ".join(row.get("matched_tokens", []) or [])
-                    if matched:
-                        st.caption("Совпали артикулы: " + matched)
-                with c2:
-                    if normalize_text(row.get("url", "")):
-                        try:
-                            st.link_button("Открыть объявление", str(row.get("url", "")), use_container_width=True)
-                        except Exception:
-                            st.markdown(f'<a href="{html.escape(str(row.get("url", "")), quote=True)}" target="_blank">Открыть объявление</a>', unsafe_allow_html=True)
-                    else:
-                        st.caption("Ссылка не найдена")
+        exact_df = avito_matches[avito_matches["match_kind"] == "exact"].copy()
+        related_df = avito_matches[avito_matches["match_kind"] != "exact"].copy()
+        if not exact_df.empty:
+            st.markdown("**Точные совпадения**")
+            for _, row in exact_df.head(30).iterrows():
+                with st.container(border=True):
+                    c1, c2 = st.columns([5, 1.5])
+                    with c1:
+                        title = normalize_text(row.get("title", "")) or "Без названия"
+                        ad_id = normalize_text(row.get("ad_id", "")) or "Без номера"
+                        price = normalize_text(row.get("price", ""))
+                        matched = ", ".join(row.get("matched_tokens", []) or [])
+                        st.markdown(f"**{title}**")
+                        st.caption(f"№ {ad_id}" + (f" • Цена: {price}" if price else ""))
+                        if matched:
+                            st.caption("Совпали артикулы: " + matched)
+                    with c2:
+                        render_avito_open_button(str(row.get("url", "")), "Открыть объявление")
+        if not related_df.empty:
+            st.markdown("**Связанные совпадения**")
+            for _, row in related_df.head(30).iterrows():
+                with st.container(border=True):
+                    c1, c2 = st.columns([5, 1.5])
+                    with c1:
+                        title = normalize_text(row.get("title", "")) or "Без названия"
+                        ad_id = normalize_text(row.get("ad_id", "")) or "Без номера"
+                        price = normalize_text(row.get("price", ""))
+                        matched = ", ".join(row.get("matched_tokens", []) or [])
+                        st.markdown(f"**{title}**")
+                        st.caption(f"№ {ad_id}" + (f" • Цена: {price}" if price else ""))
+                        if matched:
+                            st.caption("Совпали артикулы: " + matched)
+                    with c2:
+                        render_avito_open_button(str(row.get("url", "")), "Открыть объявление")
     st.markdown('</div>', unsafe_allow_html=True)
 
 series_info = get_series_candidates(current_df, submitted_query, st.session_state.series_mode) if isinstance(current_df, pd.DataFrame) and submitted_query.strip() else {"prefix": "", "candidates": []}
 series_candidates = series_info.get("candidates", []) if isinstance(series_info, dict) else []
-
 if current_df is not None and submitted_query.strip() and series_candidates:
     st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Серия / цвета по части артикула</div><div class="section-sub">Если по части артикула находится серия, можно быстро отметить нужные позиции и добавить их в основной поиск.</div>', unsafe_allow_html=True)
-
     st.radio("Режим серии", ["Только оригиналы", "Показывать всё"], key="series_mode", horizontal=True)
     series_info = get_series_candidates(current_df, submitted_query, st.session_state.series_mode)
     series_candidates = series_info.get("candidates", []) if isinstance(series_info, dict) else []
-
     if series_candidates:
         st.caption(f"По префиксу {series_info.get('prefix', '')} найдено позиций: {len(series_candidates)}")
-
         c_add, c_all, c_clear = st.columns(3)
-        select_all_clicked = c_all.button("Выбрать все", use_container_width=True, key=f"series_select_all_{normalize_article(str(series_info.get('prefix', '')))}")
-        clear_all_clicked = c_clear.button("Очистить выбор", use_container_width=True, key=f"series_clear_all_{normalize_article(str(series_info.get('prefix', '')))}")
-
+        prefix_key = normalize_article(str(series_info.get('prefix', '')))
+        select_all_clicked = c_all.button("Выбрать все", use_container_width=True, key=f"series_select_all_{prefix_key}")
+        clear_all_clicked = c_clear.button("Очистить выбор", use_container_width=True, key=f"series_clear_all_{prefix_key}")
         if select_all_clicked:
-            for cand in series_candidates:
-                st.session_state[f"series_pick_{cand['article_norm']}"] = True
-            st.rerun()
-
+            st.session_state[f"series_selected_{prefix_key}"] = [str(c["article_norm"]) for c in series_candidates]
         if clear_all_clicked:
-            for cand in series_candidates:
-                st.session_state[f"series_pick_{cand['article_norm']}"] = False
-            st.rerun()
-
-        family_counts: dict[str, int] = {}
-        for cand in series_candidates:
-            family = group_label_for_article(str(cand["article_norm"]))
-            family_counts[family] = family_counts.get(family, 0) + 1
-
-        current_family = None
-        selected_articles: list[str] = []
-        for cand in series_candidates:
-            family = group_label_for_article(str(cand["article_norm"]))
-            if family != current_family and family_counts.get(family, 0) > 1:
-                st.markdown(f"**{html.escape(family)}**")
-                current_family = family
-
-            key = f"series_pick_{cand['article_norm']}"
-            checked = st.checkbox(
-                f"{cand['article']} — свободно: {fmt_qty(cand['free_qty'])} • {fmt_price_with_rub(cand['sale_price'])} • {cand['name']}",
-                key=key,
-            )
-            if checked:
-                selected_articles.append(str(cand["article"]))
-
-        add_clicked = c_add.button("Добавить отмеченные в поиск", use_container_width=True, key=f"series_add_{normalize_article(str(series_info.get('prefix', '')))}")
-        if add_clicked and selected_articles:
+            st.session_state[f"series_selected_{prefix_key}"] = []
+        options = [str(c["article_norm"]) for c in series_candidates]
+        format_map = {str(c["article_norm"]): f"{c['article']} — свободно: {fmt_qty(c['free_qty'])} • {fmt_price_with_rub(c['sale_price'])} • {c['name']}" for c in series_candidates}
+        selected_norms = st.multiselect(
+            "Выберите позиции серии",
+            options=options,
+            default=st.session_state.get(f"series_selected_{prefix_key}", []),
+            format_func=lambda x: format_map.get(x, x),
+            key=f"series_multiselect_{prefix_key}",
+            label_visibility="collapsed",
+        )
+        st.session_state[f"series_selected_{prefix_key}"] = selected_norms
+        add_clicked = c_add.button("Добавить отмеченные в поиск", use_container_width=True, key=f"series_add_{prefix_key}")
+        if add_clicked and selected_norms:
+            selected_articles = [str(c["article"]) for c in series_candidates if str(c["article_norm"]) in set(selected_norms)]
             normalized_query = "\n".join(unique_preserve_order(selected_articles))
             st.session_state.search_input = normalized_query
             st.session_state.submitted_query = normalized_query
@@ -1357,12 +1184,10 @@ if current_df is not None and submitted_query.strip() and series_candidates:
             st.rerun()
     else:
         st.info("По этой части артикула серия не найдена или подходящих позиций меньше двух.")
-
     st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-st.markdown("""<div class="section-title">Шаблон 1 — Авито / наличный расчёт</div><div class="section-sub">Авито = цена продажи -12%. Наличный = ещё -10% от цены Авито. Если товара нет по «Свободно», будет «продан».</div>""", unsafe_allow_html=True)
-
+st.markdown('<div class="section-title">Шаблон 1 — Авито / наличный расчёт</div><div class="section-sub">Авито = цена продажи -12%. Наличный = ещё -10% от цены Авито. Если товара нет по «Свободно», будет «продан».</div>', unsafe_allow_html=True)
 if current_df is None:
     st.info("Сначала загрузите прайс в левой панели 👈")
 elif not submitted_query.strip():
@@ -1374,12 +1199,10 @@ else:
     st.text_area("Готовый шаблон", height=min(500, max(180, 72 + line_count * 40)), key="offer_template_text")
     if template_text.strip():
         render_copy_big_button(template_text, "📋 Скопировать шаблон 1")
-
 st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-st.markdown(f"""<div class="section-title">Шаблон 2 — название + выбранная цена</div><div class="section-sub">Цена берётся из выбранного режима слева ({html.escape(price_label)}). Во второй шаблон попадают только позиции, где «Свободно» больше нуля.</div>""", unsafe_allow_html=True)
-
+st.markdown(f'<div class="section-title">Шаблон 2 — название + выбранная цена</div><div class="section-sub">Цена берётся из выбранного режима слева ({html.escape(price_label)}). Во второй шаблон попадают только позиции, где «Свободно» больше нуля.</div>', unsafe_allow_html=True)
 if current_df is None:
     st.info("Сначала загрузите прайс в левой панели 👈")
 elif not submitted_query.strip():
@@ -1392,5 +1215,4 @@ else:
         render_copy_big_button(second_template_text, "📋 Скопировать шаблон 2")
     else:
         st.info("Во втором шаблоне нечего показывать: найденных позиций в наличии нет.")
-
 st.markdown('</div>', unsafe_allow_html=True)
