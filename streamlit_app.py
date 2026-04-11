@@ -112,6 +112,40 @@ SUSPECT_VENDOR_ARTICLE_PREFIX_RE = re.compile(
 )
 POSITIVE_ORIGINAL_MARKERS = ["ОРИГИН", "ORIGINAL", "GENUINE", "OEM", "RETURN PROGRAM"]
 
+RESOURCE_ALLOWED_PRODUCT_TYPES = {"РАСХОДНЫЕ МАТЕРИАЛЫ"}
+OCS_ALLOWED_PRODUCT_TYPES = {
+    "РАСХОДНЫЕ МАТЕРИАЛЫ ДЛЯ МАТРИЧНЫХ ПРИНТЕРОВ",
+    "РАСХОДНЫЕ МАТЕРИАЛЫ ДЛЯ СТРУЙНЫХ ПРИНТЕРОВ",
+    "РАСХОДНЫЕ МАТЕРИАЛЫ ДЛЯ ЛАЗЕРНЫХ ПРИНТЕРОВ",
+}
+MERLION_ALLOWED_GROUP1_TYPES = {"РАСХОДНЫЕ МАТЕРИАЛЫ"}
+MERLION_ALLOWED_GROUP2_TYPES = {"ОРИГИНАЛЬНЫЕ"}
+MERLION_ALLOWED_PRODUCT_TYPES = {
+    "ДРАМ-КАРТРИДЖИ",
+    "ЛЕНТОЧНЫЕ КАРТРИДЖИ",
+    "НАБОРЫ ДЛЯ ПЕЧАТИ",
+    "ПЕЧАТАЮЩИЕ ГОЛОВКИ",
+    "СТРУЙНЫЕ КАРТРИДЖИ",
+    "ТОНЕР",
+    "ТОНЕР-КАРТРИДЖИ",
+    "ЧЕРНИЛА",
+}
+RESOURCE_ALLOWED_BRAND_KEYS = {
+    "AVISION", "BROTHER", "CANON", "EPSON", "HP", "KONICAMINOLTA", "KYOCERA",
+    "LEXMARK", "OKI", "PANASONIC", "PANTUM", "RICOH", "XEROX", "SAMSUNG",
+    "SHARP", "КАТЮША"
+}
+OCS_ALLOWED_BRAND_KEYS = set(RESOURCE_ALLOWED_BRAND_KEYS)
+MERLION_ALLOWED_BRAND_KEYS = set(RESOURCE_ALLOWED_BRAND_KEYS)
+RESOURCE_BRAND_KEY_ALIASES = {
+    "HEWLETTPACKARD": "HP",
+    "HEWLETTPACKARDINC": "HP",
+    "HPINC": "HP",
+    "KONICAMINOLTA": "KONICAMINOLTA",
+    "KONICAMINOLTAINC": "KONICAMINOLTA",
+    "XEROXCORPORATION": "XEROX",
+}
+
 
 def has_suspect_vendor_article_prefix(value: object) -> bool:
     raw = normalize_text(value).upper()
@@ -243,6 +277,93 @@ def compact_text(value: object) -> str:
     if value is None:
         return ""
     return re.sub(r"\s+", "", str(value).strip()).upper()
+
+
+def canonical_brand_key(value: object) -> str:
+    raw = contains_text(value)
+    if not raw:
+        return ""
+    key = re.sub(r"[^A-ZА-Я0-9]", "", raw)
+    return RESOURCE_BRAND_KEY_ALIASES.get(key, key)
+
+
+def first_existing_series(df: pd.DataFrame, candidates: list[str], default: object = "") -> pd.Series:
+    for candidate in candidates:
+        if candidate in df.columns:
+            return df[candidate]
+    return pd.Series([default] * len(df), index=df.index)
+
+
+def is_resource_allowed_type(value: object) -> bool:
+    return contains_text(value) in RESOURCE_ALLOWED_PRODUCT_TYPES
+
+
+def is_resource_allowed_brand(value: object) -> bool:
+    key = canonical_brand_key(value)
+    return bool(key) and key in RESOURCE_ALLOWED_BRAND_KEYS
+
+
+def is_ocs_allowed_type(value: object) -> bool:
+    return contains_text(value) in OCS_ALLOWED_PRODUCT_TYPES
+
+
+def is_ocs_allowed_brand(value: object) -> bool:
+    key = canonical_brand_key(value)
+    return bool(key) and key in OCS_ALLOWED_BRAND_KEYS
+
+
+def is_merlion_allowed_root(value: object) -> bool:
+    return contains_text(value) in MERLION_ALLOWED_GROUP1_TYPES
+
+
+def is_merlion_allowed_group2(value: object) -> bool:
+    return contains_text(value) in MERLION_ALLOWED_GROUP2_TYPES
+
+
+def is_merlion_allowed_type(value: object) -> bool:
+    return contains_text(value) in MERLION_ALLOWED_PRODUCT_TYPES
+
+
+def is_merlion_allowed_brand(value: object) -> bool:
+    key = canonical_brand_key(value)
+    return bool(key) and key in MERLION_ALLOWED_BRAND_KEYS
+
+
+def resource_brand_filter(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df.iloc[0:0].copy()
+    out = df.copy()
+    if "product_type" in out.columns:
+        out = out[out["product_type"].apply(is_resource_allowed_type)].copy()
+    if "brand" in out.columns:
+        out = out[out["brand"].apply(is_resource_allowed_brand)].copy()
+    return out.reset_index(drop=True)
+
+
+def ocs_brand_filter(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df.iloc[0:0].copy()
+    out = df.copy()
+    if "product_type" in out.columns:
+        out = out[out["product_type"].apply(is_ocs_allowed_type)].copy()
+    if "brand" in out.columns:
+        out = out[out["brand"].apply(is_ocs_allowed_brand)].copy()
+    return out.reset_index(drop=True)
+
+
+def merlion_brand_filter(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df.iloc[0:0].copy()
+    out = df.copy()
+    if "group_root" in out.columns:
+        out = out[out["group_root"].apply(is_merlion_allowed_root)].copy()
+    if "group_level2" in out.columns:
+        out = out[out["group_level2"].apply(is_merlion_allowed_group2)].copy()
+    if "product_type" in out.columns:
+        out = out[out["product_type"].apply(is_merlion_allowed_type)].copy()
+    if "brand" in out.columns:
+        out = out[out["brand"].apply(is_merlion_allowed_brand)].copy()
+    return out.reset_index(drop=True)
 
 
 def is_candidate_article_norm(norm: str) -> bool:
@@ -981,6 +1102,8 @@ def standardize_distributor_result(data: pd.DataFrame, distributor: str) -> pd.D
         data["alt_article_norm"] = data["alt_article"].map(normalize_article)
     if "quality_flags" not in data.columns:
         data["quality_flags"] = ""
+    if "product_type" not in data.columns:
+        data["product_type"] = ""
 
     data["article"] = data["article"].fillna("").astype(str).map(normalize_text)
     data["article_norm"] = data["article"].map(normalize_article)
@@ -989,6 +1112,7 @@ def standardize_distributor_result(data: pd.DataFrame, distributor: str) -> pd.D
     data["name"] = data["name"].fillna("").astype(str).map(normalize_text)
     data["brand"] = data["brand"].fillna("").astype(str).map(normalize_text)
     data["quality_flags"] = data["quality_flags"].fillna("").astype(str).map(normalize_text)
+    data["product_type"] = data["product_type"].fillna("").astype(str).map(normalize_text)
     data["free_qty"] = pd.to_numeric(data["free_qty"], errors="coerce").fillna(0)
     data["price"] = pd.to_numeric(data["price"], errors="coerce").fillna(0)
     data["name_tokens"] = data["name"].map(tokenize_text)
@@ -998,6 +1122,7 @@ def standardize_distributor_result(data: pd.DataFrame, distributor: str) -> pd.D
         + " " + data["alt_article"].astype(str)
         + " " + data["name"].astype(str)
         + " " + data["brand"].astype(str)
+        + " " + data["product_type"].astype(str)
         + " " + data["quality_flags"].astype(str)
     ).map(contains_text)
     data["distributor"] = distributor
@@ -1015,12 +1140,22 @@ def load_resource_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     data["alt_article"] = df.get("Артикул производителя", "").map(normalize_text)
     data["name"] = df.get("Номенклатура", "").map(normalize_text)
     data["brand"] = df.get("Производитель", "").map(normalize_text)
+    data["product_type"] = df.get("Тип продукции", "").map(normalize_text) if "Тип продукции" in df.columns else ""
     data["price"] = pd.to_numeric(df.get("Цена, руб", 0), errors="coerce")
     data["free_qty"] = df.get("Доступно Москва", 0).map(parse_resource_qty)
     data["quality_flags"] = collect_quality_flag_text(df)
     data = standardize_distributor_result(data, "Ресурс")
+    data["resource_type_ok"] = data["product_type"].apply(is_resource_allowed_type)
+    data["resource_brand_ok"] = data["brand"].apply(is_resource_allowed_brand)
     data["is_original"] = ~data.apply(lambda r: is_negative_substitute_text(r["article"], r["alt_article"], r["name"], r["brand"]), axis=1)
-    data["is_good_offer"] = data["is_original"] & ~data.apply(row_has_bad_offer_markers, axis=1) & ~data.apply(row_explicitly_flagged_bad, axis=1)
+    data["is_good_offer"] = (
+        data["resource_type_ok"]
+        & data["resource_brand_ok"]
+        & data["is_original"]
+        & ~data.apply(row_has_bad_offer_markers, axis=1)
+        & ~data.apply(row_explicitly_flagged_bad, axis=1)
+    )
+    data = data[data["resource_type_ok"] & data["resource_brand_ok"]].copy()
     data = data[data["free_qty"] > 0].copy()
     return data.reset_index(drop=True)
 
@@ -1031,14 +1166,25 @@ def load_ocs_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     df = df.dropna(how="all")
     data = pd.DataFrame()
     data["article"] = df.get("Каталожный номер", "").map(normalize_text)
+    data["alt_article"] = df.get("Номенклатурный номер", "").map(normalize_text) if "Номенклатурный номер" in df.columns else ""
     data["name"] = df.get("Наименование", "").map(normalize_text)
     data["brand"] = df.get("Производитель", "").map(normalize_text)
+    data["product_type"] = df.get("Категория оборудования", "").map(normalize_text) if "Категория оборудования" in df.columns else ""
     data["price"] = pd.to_numeric(df.get("Цена", 0), errors="coerce")
     data["free_qty"] = df.get("Доступно для резерва", 0).map(parse_ocs_qty)
     data["quality_flags"] = collect_quality_flag_text(df)
     data = standardize_distributor_result(data, "OCS")
-    data["is_original"] = ~data.apply(lambda r: is_negative_substitute_text(r["article"], r["name"], r["brand"]), axis=1)
-    data["is_good_offer"] = data["is_original"] & ~data.apply(row_has_bad_offer_markers, axis=1) & ~data.apply(row_explicitly_flagged_bad, axis=1)
+    data["ocs_type_ok"] = data["product_type"].apply(is_ocs_allowed_type)
+    data["ocs_brand_ok"] = data["brand"].apply(is_ocs_allowed_brand)
+    data["is_original"] = ~data.apply(lambda r: is_negative_substitute_text(r["article"], r["alt_article"], r["name"], r["brand"]), axis=1)
+    data["is_good_offer"] = (
+        data["ocs_type_ok"]
+        & data["ocs_brand_ok"]
+        & data["is_original"]
+        & ~data.apply(row_has_bad_offer_markers, axis=1)
+        & ~data.apply(row_explicitly_flagged_bad, axis=1)
+    )
+    data = data[data["ocs_type_ok"] & data["ocs_brand_ok"]].copy()
     data = data[data["free_qty"] > 0].copy()
     return data.reset_index(drop=True)
 
@@ -1048,18 +1194,38 @@ def load_merlion_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Price List", header=4)
     df = df.dropna(how="all")
     data = pd.DataFrame()
-    data["article"] = df.get("Код производителя", "").map(normalize_text)
-    data["alt_article"] = df.get("Доп. Номер", "").map(normalize_text) if "Доп. Номер" in df.columns else ""
-    data["name"] = df.get("Наименование", "").map(normalize_text)
-    data["brand"] = df.get("Бренд", "").map(normalize_text)
-    data["group2"] = df.get("Группа 2", "").map(normalize_text) if "Группа 2" in df.columns else ""
-    data["price"] = pd.to_numeric(df.get("Цена(руб)", 0), errors="coerce")
-    data["free_qty"] = df.get("Доступно", 0).map(parse_merlion_qty)
+    data["article"] = first_existing_series(df, ["Код производителя"], "").map(normalize_text)
+    data["alt_article"] = first_existing_series(df, ["Доп. Номер"], "").map(normalize_text)
+    data["name"] = first_existing_series(df, ["Наименование"], "").map(normalize_text)
+    data["brand"] = first_existing_series(df, ["Бренд", "Производитель"], "").map(normalize_text)
+    data["group_root"] = first_existing_series(df, ["Группа 1", "Группа1", "Товарная группа", "Группа"], "").map(normalize_text)
+    data["group_level2"] = first_existing_series(df, ["Группа 2", "Группа2", "Подгруппа", "Категория"], "").map(normalize_text)
+    data["product_type"] = first_existing_series(df, ["Группа 3", "Группа3", "Вид товара", "Подкатегория"], "").map(normalize_text)
+    data["price"] = pd.to_numeric(first_existing_series(df, ["Цена(руб)", "Цена"], 0), errors="coerce")
+    data["free_qty"] = first_existing_series(df, ["Доступно", "Наличие"], 0).map(parse_merlion_qty)
     data["quality_flags"] = collect_quality_flag_text(df)
     data = standardize_distributor_result(data, "Мерлион")
-    is_original_group = data["group2"].astype(str).str.upper().str.contains("ОРИГИН") if "group2" in data.columns else True
-    data["is_original"] = is_original_group & ~data.apply(lambda r: is_negative_substitute_text(r["article"], r["alt_article"], r["name"], r["brand"], r.get("group2", "")), axis=1)
-    data["is_good_offer"] = data["is_original"] & ~data.apply(row_has_bad_offer_markers, axis=1) & ~data.apply(row_explicitly_flagged_bad, axis=1)
+    data["merlion_root_ok"] = data["group_root"].apply(is_merlion_allowed_root)
+    data["merlion_group2_ok"] = data["group_level2"].apply(is_merlion_allowed_group2)
+    data["merlion_type_ok"] = data["product_type"].apply(is_merlion_allowed_type)
+    data["merlion_brand_ok"] = data["brand"].apply(is_merlion_allowed_brand)
+    data["is_original"] = (
+        data["merlion_root_ok"]
+        & data["merlion_group2_ok"]
+        & data["merlion_type_ok"]
+        & data["merlion_brand_ok"]
+        & ~data.apply(lambda r: is_negative_substitute_text(r["article"], r["alt_article"], r["name"], r["brand"], r.get("group_root", ""), r.get("group_level2", ""), r.get("product_type", "")), axis=1)
+    )
+    data["is_good_offer"] = (
+        data["merlion_root_ok"]
+        & data["merlion_group2_ok"]
+        & data["merlion_type_ok"]
+        & data["merlion_brand_ok"]
+        & data["is_original"]
+        & ~data.apply(row_has_bad_offer_markers, axis=1)
+        & ~data.apply(row_explicitly_flagged_bad, axis=1)
+    )
+    data = data[data["merlion_root_ok"] & data["merlion_group2_ok"] & data["merlion_type_ok"] & data["merlion_brand_ok"]].copy()
     data = data[data["free_qty"] > 0].copy()
     return data.reset_index(drop=True)
 
@@ -1109,9 +1275,135 @@ def family_compatible(own_row: dict[str, Any], dist_row: pd.Series) -> bool:
     return own_family == dist_family
 
 
+
+def resource_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df.iloc[0:0].copy()
+
+    working = df.copy()
+    if "is_good_offer" in working.columns:
+        working = working[working["is_good_offer"] == True].copy()
+    if working.empty:
+        return working
+    working = resource_brand_filter(working)
+    if working.empty:
+        return working
+
+    primary_exact = working[working["article_norm"] == token_norm].copy()
+    if not primary_exact.empty:
+        primary_exact["_match_rank"] = 0
+        return primary_exact
+
+    alt_exact = working[working["alt_article_norm"] == token_norm].copy()
+    if not alt_exact.empty:
+        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, token_norm), axis=1)].copy()
+        if not alt_exact.empty:
+            alt_exact["_match_rank"] = 1
+            return alt_exact
+
+    name_code = working[
+        working["name_code_list"].apply(
+            lambda codes: (token_norm in codes) or (own_article_norm in codes) if isinstance(codes, list) else False
+        )
+    ].copy()
+    if not name_code.empty:
+        name_code = name_code[name_code.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
+        if not name_code.empty:
+            name_code["_match_rank"] = 2
+            return name_code
+
+    return working.iloc[0:0].copy()
+
+
+def ocs_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df.iloc[0:0].copy()
+
+    working = df.copy()
+    if "is_good_offer" in working.columns:
+        working = working[working["is_good_offer"] == True].copy()
+    if working.empty:
+        return working
+    working = ocs_brand_filter(working)
+    if working.empty:
+        return working
+
+    primary_exact = working[working["article_norm"] == token_norm].copy()
+    if not primary_exact.empty:
+        primary_exact["_match_rank"] = 0
+        return primary_exact
+
+    alt_exact = working[working["alt_article_norm"] == token_norm].copy()
+    if not alt_exact.empty:
+        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, token_norm), axis=1)].copy()
+        if not alt_exact.empty:
+            alt_exact["_match_rank"] = 1
+            return alt_exact
+
+    name_code = working[
+        working["name_code_list"].apply(
+            lambda codes: (token_norm in codes) or (own_article_norm in codes) if isinstance(codes, list) else False
+        )
+    ].copy()
+    if not name_code.empty:
+        name_code = name_code[name_code.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
+        if not name_code.empty:
+            name_code["_match_rank"] = 2
+            return name_code
+
+    return working.iloc[0:0].copy()
+
+
+def merlion_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df.iloc[0:0].copy()
+
+    working = df.copy()
+    if "is_good_offer" in working.columns:
+        working = working[working["is_good_offer"] == True].copy()
+    if working.empty:
+        return working
+    working = merlion_brand_filter(working)
+    if working.empty:
+        return working
+
+    alt_exact = working[working["alt_article_norm"] == token_norm].copy()
+    if not alt_exact.empty:
+        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, token_norm), axis=1)].copy()
+        if not alt_exact.empty:
+            alt_exact["_match_rank"] = 0
+            return alt_exact
+
+    primary_exact = working[working["article_norm"] == token_norm].copy()
+    if not primary_exact.empty:
+        primary_exact["_match_rank"] = 1
+        return primary_exact
+
+    linked = working[working["name_code_list"].apply(lambda codes: token_norm in codes or own_article_norm in codes if isinstance(codes, list) else False)].copy()
+    if not linked.empty:
+        linked = linked[linked.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
+        if not linked.empty:
+            linked["_match_rank"] = 2
+            return linked
+
+    return working.iloc[0:0].copy()
+
+
 def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str) -> pd.DataFrame:
     if df is None or df.empty:
         return df.iloc[0:0].copy()
+
+    distributor_name = ""
+    try:
+        distributor_name = str(df["distributor"].iloc[0])
+    except Exception:
+        distributor_name = ""
+    if distributor_name == "Ресурс":
+        return resource_search_candidates(df, token_norm, own_article_norm, search_mode)
+    if distributor_name == "OCS":
+        return ocs_search_candidates(df, token_norm, own_article_norm, search_mode)
+    if distributor_name == "Мерлион":
+        return merlion_search_candidates(df, token_norm, own_article_norm, search_mode)
 
     working = df.copy()
     if "is_good_offer" in working.columns:
