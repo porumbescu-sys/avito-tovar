@@ -85,12 +85,12 @@ NEGATIVE_SERIES_MARKERS = ["УЦЕН", "СОВМЕСТ", "СОВМ", "COMPAT", "
 
 SUBSTITUTE_NEGATIVE_MARKERS = [
     "СОВМЕСТ", "СОВМ", "COMPAT", "COMPATIBLE", "CACTUS",
-    "STATIC CONTROL", "PROFILINE", "NV PRINT", "KATUN", "SAKURA", "MYTONE",
+    "STATIC CONTROL", "PROFILINE", "NV PRINT", "KATUN", "SAKURA", "MYTONE", "MYTONER",
     "REMAN", "REFURB", "ВОССТ", "КОНТРАКТ", "Б/У", "БУ ", " USED ",
     "COPYRITE", "CET", "G&G", "ELP", "GG-", "NV-", "STATICCONTROL",
     "UNIVERSAL", "СТАНДАРТ", "STANDART", "STANDARD", "BLACK&WHITE", "B&W",
     "AQC-", "HCOL-", "HST-", "XST-", "LI-", "STA-", "BULAT", "COLORING",
-    "АНАЛОГ", "ANALOG", "АНАЛ", "СОВМЕСТИМ", "NONAME"
+    "АНАЛОГ", "ANALOG", "АНАЛ", "СОВМЕСТИМЫЙ", "COMPATIBLE TONER", "СОВМЕСТИМ", "NONAME"
 ]
 BAD_OFFER_MARKERS = [
     "УЦЕН", "УЦЕНКА", "РАСПРОДАЖ", "ЛИКВИД", "SALE", "DISCOUNT", "OUTLET",
@@ -105,6 +105,84 @@ QUALITY_FLAG_COLUMN_MARKERS = [
     "REFURB", "REMAN", "USED", "Б/У", "БУ", "СТОК", "OUT OF BOX"
 ]
 ALL_NEGATIVE_DIST_MARKERS = sorted(set(SUBSTITUTE_NEGATIVE_MARKERS + BAD_OFFER_MARKERS))
+
+SUSPECT_VENDOR_ARTICLE_PREFIX_RE = re.compile(
+    r"^(?:MT|GG|CS|ELP|OPC|PCR|DR|WB|CH|SR|LI|HST|XST|HCOL|AQC|STA|NV|SC|BULAT|CET|KATUN|SAKURA|PROFILINE|STATIC)[-/]",
+    re.IGNORECASE,
+)
+POSITIVE_ORIGINAL_MARKERS = ["ОРИГИН", "ORIGINAL", "GENUINE", "OEM", "RETURN PROGRAM"]
+
+
+def has_suspect_vendor_article_prefix(value: object) -> bool:
+    raw = normalize_text(value).upper()
+    if not raw:
+        return False
+    return bool(SUSPECT_VENDOR_ARTICLE_PREFIX_RE.match(raw))
+
+
+def confident_dist_code_count(row: pd.Series) -> int:
+    codes = row.get("name_code_list", []) or []
+    seen: set[str] = set()
+    count = 0
+    for code in codes:
+        norm = normalize_article(code)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        count += 1
+    return count
+
+
+def is_confident_alt_exact_match(row: pd.Series, token_norm: str) -> bool:
+    if not bool(row.get("is_good_offer", True)):
+        return False
+    if not bool(row.get("is_original", True)):
+        return False
+
+    article_raw = row.get("article", "")
+    alt_raw = row.get("alt_article", "")
+    name_raw = row.get("name", "")
+    brand_raw = row.get("brand", "")
+
+    if has_suspect_vendor_article_prefix(article_raw) or has_suspect_vendor_article_prefix(alt_raw):
+        return False
+
+    compact_article = compact_text(article_raw)
+    compact_alt = compact_text(alt_raw)
+    token_compact = compact_text(token_norm)
+
+    if token_compact and compact_article and compact_article != token_compact and token_compact in compact_article:
+        return False
+
+    if text_has_any_marker(" ".join([str(article_raw), str(alt_raw), str(name_raw), str(brand_raw)]), SUBSTITUTE_NEGATIVE_MARKERS):
+        return False
+
+    code_count = confident_dist_code_count(row)
+    if code_count > 4:
+        return False
+
+    dist_family = detect_supply_family(article_raw, alt_raw, name_raw)
+    if dist_family == "OTHER" and not text_has_any_marker(name_raw, POSITIVE_ORIGINAL_MARKERS):
+        return False
+
+    return True
+
+
+def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, Any], token_norm: str) -> bool:
+    if not bool(row.get("is_good_offer", True)):
+        return False
+    if not family_compatible(choice, row):
+        return False
+
+    own_article_norm = normalize_article(choice.get("article", ""))
+    row_article_norm = normalize_article(row.get("article", ""))
+    row_alt_norm = normalize_article(row.get("alt_article", ""))
+
+    if row_article_norm == token_norm or row_article_norm == own_article_norm:
+        return True
+    if row_alt_norm == token_norm or row_alt_norm == own_article_norm:
+        return is_confident_alt_exact_match(row, token_norm or own_article_norm)
+    return False
 
 
 def init_state() -> None:
@@ -1012,7 +1090,7 @@ def detect_supply_family(*parts: Any) -> str:
         ("FUSER", ["ПЕЧКА", "FUSER"]),
         ("BELT", ["BELT", "ЛЕНТА ПЕРЕНОСА", "TRANSFER BELT"]),
         ("BOTTLE", ["БУТЫЛ", "BOTTLE", "WASTE TONER"]),
-        ("CARTRIDGE", ["КАРТРИДЖ", "TONER CARTRIDGE", "INK CARTRIDGE", "RIBBON"]),
+        ("CARTRIDGE", ["КАРТРИДЖ", "TONER CARTRIDGE", "INK CARTRIDGE", "RIBBON", "ТОНЕР", " TONER ", " INK "]),
     ]
     for family, markers in family_markers:
         for marker in markers:
@@ -1024,8 +1102,10 @@ def detect_supply_family(*parts: Any) -> str:
 def family_compatible(own_row: dict[str, Any], dist_row: pd.Series) -> bool:
     own_family = detect_supply_family(own_row.get("article", ""), own_row.get("name", ""))
     dist_family = detect_supply_family(dist_row.get("article", ""), dist_row.get("alt_article", ""), dist_row.get("name", ""))
-    if own_family == "OTHER" or dist_family == "OTHER":
+    if own_family == "OTHER":
         return True
+    if dist_family == "OTHER":
+        return False
     return own_family == dist_family
 
 
@@ -1039,27 +1119,37 @@ def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article
     if working.empty:
         return working
 
-    exact = working[(working["article_norm"] == token_norm) | (working["alt_article_norm"] == token_norm)].copy()
-    if not exact.empty:
-        exact["_match_rank"] = 0
-        return exact
+    primary_exact = working[working["article_norm"] == token_norm].copy()
+    if not primary_exact.empty:
+        primary_exact["_match_rank"] = 0
+        return primary_exact
 
-    # Для сравнения прайсов работаем строго: если ищем по артикулу,
-    # не проваливаемся в contains/по названию, чтобы не подхватывать
-    # чипы, ракели, аналоги и прочий мусор по кусочку OEM-кода.
+    alt_exact = working[working["alt_article_norm"] == token_norm].copy()
+    if not alt_exact.empty:
+        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, token_norm), axis=1)].copy()
+        if not alt_exact.empty:
+            alt_exact["_match_rank"] = 1
+            return alt_exact
+
+    # Для сравнения прайсов работаем максимально строго:
+    # для артикулов не проваливаемся в contains/по названию.
     if looks_like_article_token(token_norm) or looks_like_article_token(own_article_norm):
         return working.iloc[0:0].copy()
 
     linked = working[working["name_code_list"].apply(lambda codes: token_norm in codes or own_article_norm in codes if isinstance(codes, list) else False)].copy()
     if not linked.empty:
-        linked["_match_rank"] = 2
-        return linked
+        linked = linked[linked.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
+        if not linked.empty:
+            linked["_match_rank"] = 2
+            return linked
 
     if search_mode != "Только артикул":
         name_contains = working[working["search_blob"].str.contains(re.escape(token_norm), na=False, regex=True)].copy()
         if not name_contains.empty:
-            name_contains["_match_rank"] = 3
-            return name_contains
+            name_contains = name_contains[name_contains.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
+            if not name_contains.empty:
+                name_contains["_match_rank"] = 3
+                return name_contains
 
     return working.iloc[0:0].copy()
 
@@ -1089,7 +1179,7 @@ def find_best_distributor_offer_for_choice(choice: dict[str, Any], token: str, s
             if orig.empty:
                 continue
             cand = orig
-        cand = cand[cand.apply(lambda r: family_compatible(choice, r), axis=1)].copy()
+        cand = cand[cand.apply(lambda r: is_confident_distributor_row_for_choice(r, choice, token_norm), axis=1)].copy()
         if cand.empty:
             continue
         if own_brand:
