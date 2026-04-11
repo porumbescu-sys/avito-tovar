@@ -1446,59 +1446,89 @@ def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article
     return working.iloc[0:0].copy()
 
 
-def find_best_distributor_offer_for_choice(choice: dict[str, Any], token: str, search_mode: str, min_qty: float = 1.0) -> dict[str, Any] | None:
+def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, Any], token: str, search_mode: str, min_qty: float = 1.0) -> dict[str, Any] | None:
+    if df is None or df.empty:
+        return None
+
     own_price = float(choice.get("sale_price", 0) or 0)
     own_brand = str(choice.get("brand", "") or "")
     own_article_norm = normalize_article(choice.get("article", ""))
     token_norm = normalize_article(token)
     own_is_original = not is_negative_substitute_text(choice.get("article", ""), choice.get("name", ""), choice.get("brand", ""))
-    best = None
 
+    cand = distributor_search_candidates(df, token_norm, own_article_norm, search_mode)
+    if cand.empty:
+        return None
+    cand = cand[cand["free_qty"].astype(float) >= float(min_qty)].copy()
+    if "is_good_offer" in cand.columns:
+        cand = cand[cand["is_good_offer"] == True].copy()
+    if cand.empty:
+        return None
+    if own_is_original:
+        orig = cand[cand["is_original"] == True].copy() if "is_original" in cand.columns else cand.copy()
+        if orig.empty:
+            return None
+        cand = orig
+    cand = cand[cand.apply(lambda r: is_confident_distributor_row_for_choice(r, choice, token_norm), axis=1)].copy()
+    if cand.empty:
+        return None
+    if own_brand:
+        brand_filtered = cand[cand["brand"].apply(lambda x: brand_match(own_brand, str(x)))]
+        if not brand_filtered.empty:
+            cand = brand_filtered
+    sort_cols = [c for c in ["_match_rank", "price", "free_qty", "article_norm"] if c in cand.columns]
+    ascending = [True, True, False, True][: len(sort_cols)]
+    cand = cand.sort_values(sort_cols, ascending=ascending)
+    row = cand.iloc[0]
+    price = float(row["price"])
+    offer = {
+        "distributor": str(row.get("distributor", "")),
+        "price": price,
+        "price_fmt": fmt_price(price),
+        "article": str(row.get("article", "")),
+        "name": str(row.get("name", "")),
+        "brand": str(row.get("brand", "")),
+        "free_qty": float(row.get("free_qty", 0) or 0),
+        "match_rank": int(row.get("_match_rank", 99) or 99),
+    }
+    if own_price > 0:
+        delta = own_price - price
+        delta_percent = (delta / own_price) * 100.0
+        offer["delta"] = delta
+        offer["delta_fmt"] = fmt_price(abs(delta))
+        offer["delta_percent"] = delta_percent
+        offer["delta_percent_fmt"] = f"{delta_percent:.1f}".replace(".0", "")
+        if abs(delta) < 1e-9:
+            offer["status"] = "цена равна"
+        elif delta > 0:
+            offer["status"] = "лучше нас"
+        else:
+            offer["status"] = "дороже нас"
+    return offer
+
+
+
+def get_distributor_offers_for_choice(choice: dict[str, Any], token: str, search_mode: str, min_qty: float = 1.0) -> list[dict[str, Any]]:
+    offers: list[dict[str, Any]] = []
     for state_key in ["resource_df", "ocs_df", "merlion_df"]:
         df = st.session_state.get(state_key)
         if df is None or df.empty:
             continue
-        cand = distributor_search_candidates(df, token_norm, own_article_norm, search_mode)
-        if cand.empty:
-            continue
-        cand = cand[cand["free_qty"].astype(float) >= float(min_qty)].copy()
-        if "is_good_offer" in cand.columns:
-            cand = cand[cand["is_good_offer"] == True].copy()
-        if cand.empty:
-            continue
-        if own_is_original:
-            orig = cand[cand["is_original"] == True].copy() if "is_original" in cand.columns else cand.copy()
-            if orig.empty:
-                continue
-            cand = orig
-        cand = cand[cand.apply(lambda r: is_confident_distributor_row_for_choice(r, choice, token_norm), axis=1)].copy()
-        if cand.empty:
-            continue
-        if own_brand:
-            brand_filtered = cand[cand["brand"].apply(lambda x: brand_match(own_brand, str(x)))]
-            if not brand_filtered.empty:
-                cand = brand_filtered
-        sort_cols = [c for c in ["_match_rank", "price", "free_qty", "article_norm"] if c in cand.columns]
-        ascending = [True, True, False, True][: len(sort_cols)]
-        cand = cand.sort_values(sort_cols, ascending=ascending)
-        row = cand.iloc[0]
-        price = float(row["price"])
+        offer = get_best_distributor_match_for_source(df, choice, token, search_mode, min_qty=min_qty)
+        if offer:
+            offers.append(offer)
+    offers.sort(key=lambda x: (float(x.get("price", 0) or 0), -float(x.get("free_qty", 0) or 0), str(x.get("distributor", ""))))
+    return offers
+
+
+
+def find_best_distributor_offer_for_choice(choice: dict[str, Any], token: str, search_mode: str, min_qty: float = 1.0) -> dict[str, Any] | None:
+    own_price = float(choice.get("sale_price", 0) or 0)
+    best = None
+    for offer in get_distributor_offers_for_choice(choice, token, search_mode, min_qty=min_qty):
+        price = float(offer.get("price", 0) or 0)
         if own_price > 0 and price >= own_price:
             continue
-        offer = {
-            "distributor": str(row.get("distributor", "")),
-            "price": price,
-            "price_fmt": fmt_price(price),
-            "delta": max(0.0, own_price - price),
-            "delta_fmt": fmt_price(max(0.0, own_price - price)),
-            "article": str(row.get("article", "")),
-            "name": str(row.get("name", "")),
-            "free_qty": float(row.get("free_qty", 0) or 0),
-        }
-        if own_price > 0:
-            delta_percent = ((own_price - price) / own_price) * 100.0
-            offer["delta_percent"] = delta_percent
-            offer["delta_percent_fmt"] = f"{delta_percent:.1f}".replace(".0", "")
         if best is None or price < float(best["price"]):
             best = offer
     return best
@@ -1540,6 +1570,138 @@ def distributor_compare_map(result_df: pd.DataFrame, search_mode: str, min_qty: 
     for item in items:
         out[str(item["row_key"])] = item
     return out
+
+
+
+def build_all_distributor_prices_df(result_df: pd.DataFrame, search_mode: str, min_qty: float = 1.0, price_mode: Optional[str] = None, round100: bool = True, custom_discount: float = 0.0) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    if result_df is None or result_df.empty:
+        return pd.DataFrame()
+
+    connected_sources = []
+    for state_key, label in [("resource_df", "Ресурс"), ("ocs_df", "OCS"), ("merlion_df", "Мерлион")]:
+        df = st.session_state.get(state_key)
+        if df is not None and not df.empty:
+            connected_sources.append(label)
+
+    for _, row in result_df.iterrows():
+        article = str(row.get("article", "") or "")
+        name = str(row.get("name", "") or "")
+        brand = str(row.get("brand", "") or "")
+        own_price = float(row.get("sale_price", 0) or 0)
+        own_qty = float(row.get("free_qty", 0) or 0)
+        selected_price = get_selected_price_raw(row, str(price_mode or "-12%"), bool(round100), float(custom_discount)) if price_mode else None
+
+        rows.append({
+            "Артикул": article,
+            "Название": name,
+            "Производитель": brand,
+            "Источник": "Мы",
+            "Наша цена": own_price,
+            "Наша цена выбранная": selected_price,
+            "Наш остаток": own_qty,
+            "Цена": own_price,
+            "Остаток": own_qty,
+            "Разница к нам, руб": 0.0,
+            "Разница к нам, %": 0.0,
+            "Статус": "наша позиция",
+            "Артикул источника": article,
+            "Название источника": name,
+        })
+
+        choice = {
+            "article": article,
+            "name": name,
+            "brand": brand,
+            "sale_price": own_price,
+            "row_key": str(row.get("article_norm") or normalize_article(article)),
+        }
+        offers = {str(offer.get("distributor", "")): offer for offer in get_distributor_offers_for_choice(choice, article, search_mode, min_qty=min_qty)}
+
+        for source_name in connected_sources:
+            offer = offers.get(source_name)
+            if offer:
+                rows.append({
+                    "Артикул": article,
+                    "Название": name,
+                    "Производитель": brand,
+                    "Источник": source_name,
+                    "Наша цена": own_price,
+                    "Наша цена выбранная": selected_price,
+                    "Наш остаток": own_qty,
+                    "Цена": float(offer.get("price", 0) or 0),
+                    "Остаток": float(offer.get("free_qty", 0) or 0),
+                    "Разница к нам, руб": float(offer.get("delta", 0) or 0),
+                    "Разница к нам, %": round(float(offer.get("delta_percent", 0) or 0), 2),
+                    "Статус": str(offer.get("status", "найдено")),
+                    "Артикул источника": str(offer.get("article", "") or ""),
+                    "Название источника": str(offer.get("name", "") or ""),
+                })
+            else:
+                rows.append({
+                    "Артикул": article,
+                    "Название": name,
+                    "Производитель": brand,
+                    "Источник": source_name,
+                    "Наша цена": own_price,
+                    "Наша цена выбранная": selected_price,
+                    "Наш остаток": own_qty,
+                    "Цена": pd.NA,
+                    "Остаток": pd.NA,
+                    "Разница к нам, руб": pd.NA,
+                    "Разница к нам, %": pd.NA,
+                    "Статус": "нет нормального совпадения",
+                    "Артикул источника": "",
+                    "Название источника": "",
+                })
+
+    if not rows:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(rows)
+    out["_is_own"] = out["Источник"].map(lambda x: 0 if str(x) == "Мы" else 1)
+    out = out.sort_values(["Артикул", "_is_own", "Цена", "Источник"], ascending=[True, True, True, True], na_position="last").drop(columns=["_is_own"]).reset_index(drop=True)
+    return out
+
+
+
+def all_prices_to_excel_bytes(df: pd.DataFrame) -> bytes:
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Все цены")
+    bio.seek(0)
+    return bio.read()
+
+
+
+def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: str, min_qty: float, price_mode: str, round100: bool, custom_discount: float) -> None:
+    all_prices_df = build_all_distributor_prices_df(result_df, search_mode, min_qty=min_qty, price_mode=price_mode, round100=round100, custom_discount=custom_discount)
+    if all_prices_df.empty:
+        st.info("Для текущего запроса нет данных по всем ценам дистрибьютеров.")
+        return
+
+    st.caption("Здесь видно не только лучшую цену, но и следующую цену у других дистрибьютеров, плюс остаток. Это помогает не снижать цену из-за единичного хвоста на складе.")
+    for article, group_df in all_prices_df.groupby("Артикул", sort=False):
+        base_name = normalize_text(group_df.iloc[0].get("Название", ""))
+        st.markdown(f"**{article}** — {base_name}")
+        show_df = group_df[[
+            "Источник", "Цена", "Остаток", "Разница к нам, руб", "Разница к нам, %", "Статус", "Артикул источника", "Название источника"
+        ]].copy()
+        for col in ["Цена", "Остаток", "Разница к нам, руб", "Разница к нам, %"]:
+            if col not in show_df.columns:
+                continue
+        show_df["Цена"] = show_df["Цена"].apply(lambda v: fmt_price(v) if pd.notna(v) else "")
+        show_df["Остаток"] = show_df["Остаток"].apply(lambda v: fmt_qty(v) if pd.notna(v) else "")
+        show_df["Разница к нам, руб"] = show_df["Разница к нам, руб"].apply(lambda v: fmt_price(v) if pd.notna(v) else "")
+        show_df["Разница к нам, %"] = show_df["Разница к нам, %"].apply(lambda v: (str(round(float(v), 2)).replace(".0", "") + "%") if pd.notna(v) else "")
+        st.dataframe(show_df, use_container_width=True, hide_index=True, height=min(260, 70 + len(show_df) * 36))
+
+    st.download_button(
+        "⬇️ Скачать все цены в Excel",
+        all_prices_to_excel_bytes(all_prices_df),
+        file_name="moy_tovar_all_distributor_prices.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 def build_full_distributor_report(df: pd.DataFrame, threshold_percent: float, search_mode: str, min_qty: float = 1.0) -> pd.DataFrame:
@@ -2092,6 +2254,9 @@ else:
         file_name="moy_tovar_results.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+    if distributor_sources_ready():
+        with st.expander("Показать цены у всех"):
+            render_all_distributor_prices_block(result_df, search_mode, min_dist_qty, price_mode, round100, custom_discount)
 
 st.markdown('</div>', unsafe_allow_html=True)
 
