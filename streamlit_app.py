@@ -1674,6 +1674,161 @@ def all_prices_to_excel_bytes(df: pd.DataFrame) -> bytes:
 
 
 
+
+
+def build_product_analysis_df(result_df: pd.DataFrame, search_mode: str, min_qty: float = 1.0) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    if result_df is None or result_df.empty:
+        return pd.DataFrame()
+
+    seen: set[str] = set()
+    for _, row in result_df.iterrows():
+        row_key = str(row.get("article_norm") or normalize_article(row.get("article", "")))
+        if row_key in seen:
+            continue
+        seen.add(row_key)
+
+        article = str(row.get("article", "") or "")
+        name = str(row.get("name", "") or "")
+        brand = str(row.get("brand", "") or "")
+        own_qty = float(row.get("free_qty", 0) or 0)
+        own_price = float(row.get("sale_price", 0) or 0)
+        choice = {
+            "article": article,
+            "name": name,
+            "brand": brand,
+            "sale_price": own_price,
+            "row_key": row_key,
+        }
+        offers = get_distributor_offers_for_choice(choice, article, search_mode, min_qty=min_qty)
+        best_offer = offers[0] if offers else None
+
+        rows.append({
+            "Артикул": article,
+            "Название": name,
+            "Бренд": brand,
+            "КОЛ.": own_qty,
+            "тек прод": own_price,
+            "дистр": float(best_offer.get("price", 0) or 0) if best_offer else None,
+            "Дистрибьютор": str(best_offer.get("distributor", "") or "") if best_offer else "",
+            "Остаток дистрибьютора": float(best_offer.get("free_qty", 0) or 0) if best_offer else None,
+            "Артикул источника": str(best_offer.get("article", "") or "") if best_offer else "",
+            "Название источника": str(best_offer.get("name", "") or "") if best_offer else "",
+        })
+
+    return pd.DataFrame(rows)
+
+
+
+def build_product_analysis_workbook_bytes(result_df: pd.DataFrame, search_mode: str, min_qty: float = 1.0) -> bytes:
+    analysis_df = build_product_analysis_df(result_df, search_mode, min_qty=min_qty)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Анализ товара"
+
+    headers = [
+        "Артикул", "", "КОЛ.", "тек прод", "дистр", "МИ", "ВЦМ", "Ятовары", "Мы на авито",
+        "авито мин", "сред. Зак.", "Прод пред", "пред на Авито", "", "% прод", "% Авито"
+    ]
+    ws.append(headers)
+
+    column_widths = {
+        "A": 14, "B": 4, "C": 10, "D": 12, "E": 12, "F": 10, "G": 10, "H": 12,
+        "I": 13, "J": 12, "K": 12, "L": 12, "M": 14, "N": 4, "O": 10, "P": 10,
+    }
+    for col, width in column_widths.items():
+        ws.column_dimensions[col].width = width
+
+    header_fill = openpyxl.styles.PatternFill(fill_type="solid", fgColor="D9E2F3")
+    thin_gray = openpyxl.styles.Side(style="thin", color="D0D7E2")
+    border = openpyxl.styles.Border(left=thin_gray, right=thin_gray, top=thin_gray, bottom=thin_gray)
+    header_font = openpyxl.styles.Font(bold=True)
+    center = openpyxl.styles.Alignment(horizontal="center", vertical="center")
+
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.border = border
+        cell.alignment = center
+
+    currency_format = '#,##0.00'
+    percent_format = '0.00%'
+
+    for excel_row, rec in enumerate(analysis_df.to_dict(orient="records"), start=2):
+        ws.cell(excel_row, 1).value = rec.get("Артикул", "")
+        ws.cell(excel_row, 3).value = rec.get("КОЛ.", None)
+        ws.cell(excel_row, 4).value = rec.get("тек прод", None)
+        ws.cell(excel_row, 5).value = rec.get("дистр", None)
+        ws.cell(excel_row, 6).value = None
+        ws.cell(excel_row, 7).value = None
+        ws.cell(excel_row, 8).value = None
+        ws.cell(excel_row, 9).value = None
+        ws.cell(excel_row, 10).value = None
+        ws.cell(excel_row, 11).value = None
+        ws.cell(excel_row, 12).value = f'=IF(E{excel_row}="","",E{excel_row}-E{excel_row}*5%)'
+        ws.cell(excel_row, 13).value = f'=IF(L{excel_row}="","",L{excel_row}-L{excel_row}*20%)'
+        ws.cell(excel_row, 15).value = f'=IF(OR(K{excel_row}="",K{excel_row}=0,L{excel_row}=""),"",L{excel_row}/K{excel_row}-1)'
+        ws.cell(excel_row, 16).value = f'=IF(OR(K{excel_row}="",K{excel_row}=0,M{excel_row}=""),"",M{excel_row}/K{excel_row}-1)'
+
+        # Comments with context from the parser so the manager sees where the dist price came from.
+        if rec.get("дистр") not in (None, ""):
+            comment_lines = []
+            dist_name = normalize_text(rec.get("Дистрибьютор", ""))
+            if dist_name:
+                comment_lines.append(f"Лучшее предложение: {dist_name}")
+            dist_qty = rec.get("Остаток дистрибьютора")
+            if dist_qty not in (None, ""):
+                comment_lines.append(f"Остаток: {fmt_qty(dist_qty)} шт.")
+            src_article = normalize_text(rec.get("Артикул источника", ""))
+            if src_article:
+                comment_lines.append(f"Артикул источника: {src_article}")
+            src_name = normalize_text(rec.get("Название источника", ""))
+            if src_name:
+                comment_lines.append(src_name)
+            if comment_lines:
+                ws.cell(excel_row, 5).comment = openpyxl.comments.Comment("\n".join(comment_lines), "ChatGPT")
+
+        for col_idx in [4, 5, 6, 7, 8, 9, 10, 11, 12, 13]:
+            ws.cell(excel_row, col_idx).number_format = currency_format
+        for col_idx in [15, 16]:
+            ws.cell(excel_row, col_idx).number_format = percent_format
+
+    max_row = max(ws.max_row, 2)
+    for row in ws.iter_rows(min_row=2, max_row=max_row, min_col=1, max_col=16):
+        for cell in row:
+            cell.border = border
+            if cell.column in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16):
+                cell.alignment = center
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:P{max_row}"
+
+    info = wb.create_sheet("Справка")
+    info["A1"] = "Как читать файл"
+    info["A1"].font = openpyxl.styles.Font(bold=True, size=12)
+    info["A3"] = "Артикул / КОЛ. / тек прод"
+    info["B3"] = "Заполняются автоматически из результата поиска и вашего прайса."
+    info["A4"] = "дистр"
+    info["B4"] = "Подставляется лучшая цена из валидных предложений Ресурс / OCS / Мерлион. В комментарии к ячейке есть дистрибьютор, остаток и источник."
+    info["A5"] = "МИ / ВЦМ / Ятовары / Мы на авито / авито мин / сред. Зак."
+    info["B5"] = "Эти поля вы заполняете вручную перед обсуждением с руководителем."
+    info["A6"] = "Прод пред"
+    info["B6"] = "Считается как дистр - 5%."
+    info["A7"] = "пред на Авито"
+    info["B7"] = "Считается как Прод пред - 20%."
+    info["A8"] = "% прод / % Авито"
+    info["B8"] = "Считаются относительно среднего закупа."
+    info.column_dimensions["A"].width = 26
+    info.column_dimensions["B"].width = 90
+    info.freeze_panes = "A3"
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio.read()
+
+
 def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: str, min_qty: float, price_mode: str, round100: bool, custom_discount: float) -> None:
     all_prices_df = build_all_distributor_prices_df(result_df, search_mode, min_qty=min_qty, price_mode=price_mode, round100=round100, custom_discount=custom_discount)
     if all_prices_df.empty:
@@ -2257,6 +2412,13 @@ else:
     if distributor_sources_ready():
         with st.expander("Показать цены у всех"):
             render_all_distributor_prices_block(result_df, search_mode, min_dist_qty, price_mode, round100, custom_discount)
+        st.download_button(
+            "⬇️ Скачать анализ товара",
+            build_product_analysis_workbook_bytes(result_df, search_mode, min_qty=min_dist_qty),
+            file_name="analysis_product.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Файл для обсуждения новых цен: артикул, количество, текущий прод и лучшая цена дистрибьютора уже заполнены. Остальные поля можно внести вручную.",
+        )
 
 st.markdown('</div>', unsafe_allow_html=True)
 
