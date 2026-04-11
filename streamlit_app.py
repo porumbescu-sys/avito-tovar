@@ -85,11 +85,12 @@ NEGATIVE_SERIES_MARKERS = ["УЦЕН", "СОВМЕСТ", "СОВМ", "COMPAT", "
 
 SUBSTITUTE_NEGATIVE_MARKERS = [
     "СОВМЕСТ", "СОВМ", "COMPAT", "COMPATIBLE", "CACTUS",
-    "STATIC CONTROL", "PROFILINE", "NV PRINT", "KATUN", "SAKURA",
+    "STATIC CONTROL", "PROFILINE", "NV PRINT", "KATUN", "SAKURA", "MYTONE",
     "REMAN", "REFURB", "ВОССТ", "КОНТРАКТ", "Б/У", "БУ ", " USED ",
     "COPYRITE", "CET", "G&G", "ELP", "GG-", "NV-", "STATICCONTROL",
     "UNIVERSAL", "СТАНДАРТ", "STANDART", "STANDARD", "BLACK&WHITE", "B&W",
-    "AQC-", "HCOL-", "HST-", "XST-", "LI-", "STA-", "BULAT", "COLORING"
+    "AQC-", "HCOL-", "HST-", "XST-", "LI-", "STA-", "BULAT", "COLORING",
+    "АНАЛОГ", "ANALOG", "АНАЛ", "СОВМЕСТИМ", "NONAME"
 ]
 BAD_OFFER_MARKERS = [
     "УЦЕН", "УЦЕНКА", "РАСПРОДАЖ", "ЛИКВИД", "SALE", "DISCOUNT", "OUTLET",
@@ -1001,6 +1002,33 @@ def brand_match(catalog_brand: str, dist_brand: str) -> bool:
     return a in b or b in a
 
 
+def detect_supply_family(*parts: Any) -> str:
+    text = contains_text(" ".join(str(p or "") for p in parts))
+    family_markers = [
+        ("CHIP", ["ЧИП", " CHIP "]),
+        ("DRUM", ["ФОТОБАРАБ", "БАРАБАН", "DRUM", "OPC", "IMAGING UNIT", "IMAGE UNIT"]),
+        ("BLADE", ["РАКЕЛ", "ЛЕЗВИ", "WIPER", "BLADE", "DOCTOR BLADE", "ДОЗИРУЮЩ"]),
+        ("DEVELOPER", ["ДЕВЕЛОП", "DEVELOPER"]),
+        ("FUSER", ["ПЕЧКА", "FUSER"]),
+        ("BELT", ["BELT", "ЛЕНТА ПЕРЕНОСА", "TRANSFER BELT"]),
+        ("BOTTLE", ["БУТЫЛ", "BOTTLE", "WASTE TONER"]),
+        ("CARTRIDGE", ["КАРТРИДЖ", "TONER CARTRIDGE", "INK CARTRIDGE", "RIBBON"]),
+    ]
+    for family, markers in family_markers:
+        for marker in markers:
+            if contains_text(marker).strip() in text:
+                return family
+    return "OTHER"
+
+
+def family_compatible(own_row: dict[str, Any], dist_row: pd.Series) -> bool:
+    own_family = detect_supply_family(own_row.get("article", ""), own_row.get("name", ""))
+    dist_family = detect_supply_family(dist_row.get("article", ""), dist_row.get("alt_article", ""), dist_row.get("name", ""))
+    if own_family == "OTHER" or dist_family == "OTHER":
+        return True
+    return own_family == dist_family
+
+
 def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str) -> pd.DataFrame:
     if df is None or df.empty:
         return df.iloc[0:0].copy()
@@ -1016,18 +1044,9 @@ def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article
         exact["_match_rank"] = 0
         return exact
 
-    article_contains = working[
-        (working["article_norm"].str.contains(re.escape(token_norm), na=False, regex=True))
-        | (working["alt_article_norm"].str.contains(re.escape(token_norm), na=False, regex=True))
-        | ((token_norm != own_article_norm) & (
-            working["article_norm"].str.contains(re.escape(own_article_norm), na=False, regex=True)
-            | working["alt_article_norm"].str.contains(re.escape(own_article_norm), na=False, regex=True)
-        ))
-    ].copy()
-    if not article_contains.empty:
-        article_contains["_match_rank"] = 1
-        return article_contains
-
+    # Для сравнения прайсов работаем строго: если ищем по артикулу,
+    # не проваливаемся в contains/по названию, чтобы не подхватывать
+    # чипы, ракели, аналоги и прочий мусор по кусочку OEM-кода.
     if looks_like_article_token(token_norm) or looks_like_article_token(own_article_norm):
         return working.iloc[0:0].copy()
 
@@ -1070,6 +1089,9 @@ def find_best_distributor_offer_for_choice(choice: dict[str, Any], token: str, s
             if orig.empty:
                 continue
             cand = orig
+        cand = cand[cand.apply(lambda r: family_compatible(choice, r), axis=1)].copy()
+        if cand.empty:
+            continue
         if own_brand:
             brand_filtered = cand[cand["brand"].apply(lambda x: brand_match(own_brand, str(x)))]
             if not brand_filtered.empty:
