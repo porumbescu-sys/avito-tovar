@@ -6,7 +6,7 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import openpyxl
 import pandas as pd
@@ -69,44 +69,6 @@ COLOR_KEYWORDS = [
     ("зел", "зеленый"),
 ]
 
-
-def init_state() -> None:
-    defaults = {
-        "catalog_df": None,
-        "catalog_name": "ещё не загружен",
-        "avito_df": None,
-        "avito_name": "ещё не загружен",
-        "search_input": "",
-        "submitted_query": "",
-        "last_result": None,
-        "price_mode": "-12%",
-        "custom_discount": 10.0,
-        "round100": True,
-        "search_mode": "Только артикул",
-        "template1_footer": DEFAULT_TEMPLATE1_FOOTER,
-        "price_patch_input": "",
-        "patch_message": "",
-        "series_mode": "Только оригиналы",
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
-
-
-init_state()
-
-
-def normalize_text(value: object) -> str:
-    if value is None:
-        return ""
-    return re.sub(r"\s+", " ", str(value).strip())
-
-
-def normalize_article(value: object) -> str:
-    text = normalize_text(value)
-    return re.sub(r"[^A-Za-zА-Яа-я0-9]", "", text).upper()
-
-
 ARTICLE_PIECE_RE = re.compile(r"^[A-Za-zА-Яа-я0-9._-]{3,}$")
 SERIES_SUFFIX_ORDER = {
     "A": 0,
@@ -120,6 +82,88 @@ SERIES_SUFFIX_ORDER = {
     "K": 8,
 }
 NEGATIVE_SERIES_MARKERS = ["УЦЕН", "СОВМЕСТ", "СОВМ", "COMPAT", "COMPATIBLE", "CACTUS", "КОНТРАКТ", "REFURB", "ВОССТ", "REMAN"]
+
+SUBSTITUTE_NEGATIVE_MARKERS = [
+    "СОВМЕСТ", "СОВМ", "COMPAT", "COMPATIBLE", "CACTUS",
+    "STATIC CONTROL", "PROFILINE", "NV PRINT", "KATUN", "SAKURA",
+    "REMAN", "REFURB", "ВОССТ", "КОНТРАКТ", "Б/У", "БУ ", " USED ",
+    "COPYRITE", "CET", "G&G", "ELP", "GG-", "NV-", "STATICCONTROL",
+    "UNIVERSAL", "СТАНДАРТ", "STANDART", "STANDARD", "BLACK&WHITE", "B&W",
+    "AQC-", "HCOL-", "HST-", "XST-", "LI-", "STA-", "BULAT", "COLORING"
+]
+BAD_OFFER_MARKERS = [
+    "УЦЕН", "УЦЕНКА", "РАСПРОДАЖ", "ЛИКВИД", "SALE", "DISCOUNT", "OUTLET",
+    "OPENBOX", "OPEN BOX", "OPEN-BOX", "ВИТРИН", "ДЕМО", "DEMO", "DISPLAY",
+    "ПОВРЕЖД", "МЯТАЯУПАК", "МЯТАЯ УПАК", "БЕЗУПАК", "БЕЗ УПАК", "ПЕРЕУПАК",
+    "REPACK", "REFURB", "REMAN", "ВОССТ", "USED", "Б/У", "БУ ", "УПАКОВКАПОВРЕЖДЕНА"
+]
+QUALITY_FLAG_COLUMN_MARKERS = [
+    "УЦЕН", "УЦЕНКА", "РАСПРОДАЖ", "НЕКОНД", "НЕКОНДИЦ", "ЛИКВИД",
+    "SALE", "DISCOUNT", "OUTLET", "OPEN BOX", "OPENBOX", "OPEN-BOX",
+    "DEMO", "DISPLAY", "ВИТРИН", "ПОВРЕЖД", "МЯТАЯ", "REPACK",
+    "REFURB", "REMAN", "USED", "Б/У", "БУ", "СТОК", "OUT OF BOX"
+]
+ALL_NEGATIVE_DIST_MARKERS = sorted(set(SUBSTITUTE_NEGATIVE_MARKERS + BAD_OFFER_MARKERS))
+
+
+def init_state() -> None:
+    defaults = {
+        "catalog_df": None,
+        "catalog_name": "ещё не загружен",
+        "avito_df": None,
+        "avito_name": "ещё не загружен",
+        "resource_df": None,
+        "resource_name": "ещё не загружен",
+        "ocs_df": None,
+        "ocs_name": "ещё не загружен",
+        "merlion_df": None,
+        "merlion_name": "ещё не загружен",
+        "search_input": "",
+        "submitted_query": "",
+        "last_result": None,
+        "price_mode": "-12%",
+        "custom_discount": 10.0,
+        "round100": True,
+        "search_mode": "Только артикул",
+        "template1_footer": DEFAULT_TEMPLATE1_FOOTER,
+        "price_patch_input": "",
+        "patch_message": "",
+        "series_mode": "Только оригиналы",
+        "distributor_threshold": 20.0,
+        "distributor_min_qty": 1.0,
+        "distributor_report_df": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+init_state()
+
+
+# ------------------------------
+# Базовые функции текущего файла
+# ------------------------------
+
+def normalize_text(value: object) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value).strip())
+
+
+def normalize_article(value: object) -> str:
+    text = normalize_text(value)
+    return re.sub(r"[^A-Za-zА-Яа-я0-9]", "", text).upper()
+
+
+def contains_text(value: object) -> str:
+    return normalize_text(value).upper()
+
+
+def compact_text(value: object) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", "", str(value).strip()).upper()
 
 
 def is_candidate_article_norm(norm: str) -> bool:
@@ -173,11 +217,6 @@ def series_sort_key(candidate: dict[str, object]) -> tuple[object, ...]:
     family, suffix = split_article_family_suffix(article_norm)
     rank = SERIES_SUFFIX_ORDER.get(suffix, 50)
     return (*natural_chunks(family), rank, suffix, article_norm)
-
-
-def group_label_for_article(article_norm: str) -> str:
-    family, _ = split_article_family_suffix(article_norm)
-    return family
 
 
 def tokenize_text(value: object) -> list[str]:
@@ -613,23 +652,6 @@ def perform_search(df: pd.DataFrame, query: str, search_mode: str) -> pd.DataFra
     return out
 
 
-def build_display_df(df: pd.DataFrame, price_mode: str, round100: bool, custom_discount: float) -> pd.DataFrame:
-    out = df.copy()
-    out["selected_price"] = out.apply(lambda row: get_selected_price_raw(row, price_mode, round100, custom_discount), axis=1)
-    label = current_price_label(price_mode, custom_discount)
-    return pd.DataFrame(
-        {
-            "Артикул": out["article"],
-            "Название": out["name"],
-            "Производитель": out["brand"],
-            "Свободно": out["free_qty"].map(fmt_qty),
-            "Всего": out["total_qty"].map(fmt_qty),
-            "Цена продажи": out["sale_price"].map(fmt_price),
-            label: out["selected_price"].map(fmt_price),
-        }
-    )
-
-
 def compact_multiline(text: str) -> str:
     lines = [normalize_text(line) for line in str(text).splitlines()]
     lines = [line for line in lines if line]
@@ -750,102 +772,425 @@ def find_avito_ads(avito_df: pd.DataFrame, query: str, result_df: Optional[pd.Da
     return out
 
 
-def render_avito_open_button(url: str, label: str = "Открыть объявление") -> None:
-    if not normalize_text(url):
-        st.caption("Ссылка не найдена")
-        return
+# ------------------------------------------
+# Новые функции: дистрибьютеры и сравнение
+# ------------------------------------------
+
+def text_has_any_marker(raw_text: str, markers: list[str]) -> bool:
+    compact = compact_text(raw_text)
+    spaced = contains_text(raw_text)
+    for marker in markers:
+        marker_compact = compact_text(marker)
+        marker_spaced = contains_text(marker)
+        if marker_compact and marker_compact in compact:
+            return True
+        if marker_spaced and marker_spaced in spaced:
+            return True
+    return False
+
+
+def is_truthy_flag_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, float) and math.isnan(value):
+        return False
+    text = contains_text(value)
+    compact = compact_text(value)
+    if not text and not compact:
+        return False
+    if compact in {"", "0", "НЕТ", "NO", "FALSE", "NONE", "ОК", "OK", "НОРМА", "НОВЫЙ"}:
+        return False
+    if text in {"-", "--", "---"}:
+        return False
+    return True
+
+
+def is_negative_substitute_text(*parts: Any) -> bool:
+    return text_has_any_marker(" ".join(str(p or "") for p in parts), SUBSTITUTE_NEGATIVE_MARKERS)
+
+
+def is_bad_offer_text(*parts: Any) -> bool:
+    return text_has_any_marker(" ".join(str(p or "") for p in parts), BAD_OFFER_MARKERS)
+
+
+def row_explicitly_flagged_bad(row: pd.Series) -> bool:
+    return is_truthy_flag_value(row.get("quality_flags", ""))
+
+
+def row_has_bad_offer_markers(row: pd.Series) -> bool:
+    text = " ".join([
+        str(row.get("article", "") or ""),
+        str(row.get("alt_article", "") or ""),
+        str(row.get("name", "") or ""),
+        str(row.get("brand", "") or ""),
+        str(row.get("group2", "") or ""),
+        str(row.get("quality_flags", "") or ""),
+    ])
+    return is_bad_offer_text(text)
+
+
+def collect_quality_flag_text(df: pd.DataFrame) -> pd.Series:
+    if df is None or df.empty:
+        return pd.Series(dtype=str)
+    selected: list[str] = []
+    for col in df.columns:
+        col_text = contains_text(col)
+        if any(contains_text(marker) in col_text for marker in QUALITY_FLAG_COLUMN_MARKERS):
+            selected.append(col)
+    if not selected:
+        return pd.Series([""] * len(df), index=df.index, dtype=object)
+    result = pd.Series([""] * len(df), index=df.index, dtype=object)
+    for col in selected:
+        result = result.astype(str) + " " + df[col].fillna("").astype(str)
+    return result.str.strip()
+
+
+def parse_resource_qty(value: Any) -> float:
+    text = contains_text(value)
+    compact = compact_text(value)
     try:
-        st.link_button(label, url, use_container_width=True)
+        parsed = float(str(value).replace(" ", "").replace(",", "."))
+        return max(0.0, parsed)
     except Exception:
-        st.markdown(f'<a href="{html.escape(url, quote=True)}" target="_blank">{html.escape(label)}</a>', unsafe_allow_html=True)
+        pass
+    if compact in {"+++", "МНОГО"}:
+        return 10.0
+    if compact in {"++"}:
+        return 5.0
+    if compact in {"+"}:
+        return 1.0
+    if any(x in text for x in ["НЕТ", "ПОД ЗАКАЗ", "ОЖИДАЕТСЯ"]):
+        return 0.0
+    return 0.0
 
 
-def render_copy_big_button(text_value: str, button_label: str = "📋 Скопировать весь шаблон") -> None:
-    escaped = json.dumps(text_value, ensure_ascii=False)
-    html_block = f"""
-    <div style='margin-top:8px;'>
-      <button onclick='navigator.clipboard.writeText({escaped}).then(() => {{ this.innerText = "Скопировано"; setTimeout(() => this.innerText = {json.dumps(button_label, ensure_ascii=False)}, 1200); }})'
-        style='border:none;background:#315efb;color:white;font-weight:800;border-radius:12px;padding:12px 16px;cursor:pointer;min-width:220px;'>
-        {html.escape(button_label)}
-      </button>
-    </div>
-    """
-    components.html(html_block, height=58)
+def parse_ocs_qty(value: Any) -> float:
+    text = contains_text(value)
+    compact = compact_text(value)
+    try:
+        parsed = float(str(value).replace(" ", "").replace(",", "."))
+        return max(0.0, parsed)
+    except Exception:
+        pass
+    if compact in {"ЕСТЬ", "+", "+++"}:
+        return 10.0
+    if any(marker in text for marker in ["ПОД ЗАКАЗ", "ОЖИДАЕТСЯ", "НЕТ"]):
+        return 0.0
+    return 0.0
 
 
-def render_results_table(df: pd.DataFrame, price_mode: str, round100: bool, custom_discount: float) -> None:
-    selected_label = current_price_label(price_mode, custom_discount)
-    rows_html = []
-    for _, row in df.iterrows():
-        selected_raw = get_selected_price_raw(row, price_mode, round100, custom_discount)
-        selected_fmt = fmt_price(selected_raw)
-        match_type = str(row.get("match_type", ""))
-        if match_type == "exact":
-            badge_html = "<div class='match-badge match-badge-exact'>Точное совпадение</div>"
-        elif match_type == "linked":
-            badge_html = "<div class='match-badge match-badge-linked'>Найдено по названию</div>"
-        else:
-            badge_html = "<div class='match-badge match-badge-similar'>Похожее совпадение</div>"
-        rows_html.append(
-            f"""
-            <tr>
-              <td><span class='article-pill'>{html.escape(str(row['article']))}</span></td>
-              <td><div class='name-cell'>{html.escape(str(row['name']))}</div>{badge_html}</td>
-              <td>{html.escape(str(row['brand'] or ''))}</td>
-              <td>{fmt_qty(row['free_qty'])}</td>
-              <td>{fmt_qty(row['total_qty'])}</td>
-              <td class='sale-col'>{fmt_price(row['sale_price'])} руб.</td>
-              <td class='selected-col'>{selected_fmt}</td>
-              <td><button class='copy-btn' onclick="navigator.clipboard.writeText('{selected_fmt}').then(() => {{ this.innerText = 'Скопировано'; setTimeout(() => this.innerText = 'Копировать цену', 1200); }})">Копировать цену</button></td>
-            </tr>
-            """
-        )
-    table_html = f"""
-    <!doctype html>
-    <html><head><meta charset='utf-8'/>
-    <style>
-      body {{ margin:0; font-family: Inter, Arial, sans-serif; background: transparent; }}
-      .wrap {{ background:white; border:1px solid #dbe5f1; border-radius:18px; overflow:hidden; }}
-      table {{ width:100%; border-collapse:collapse; font-size:14px; }}
-      thead th {{ background:#eef3fb; color:#334155; text-align:left; padding:14px; font-weight:800; border-bottom:1px solid #d7e1ef; }}
-      tbody td {{ padding:14px; border-bottom:1px solid #e5edf6; vertical-align:top; color:#1e293b; }}
-      tbody tr:last-child td {{ border-bottom:none; }}
-      .article-pill {{ display:inline-block; padding:6px 10px; border-radius:999px; background:#edf2ff; color:#315efb; font-weight:800; }}
-      .name-cell {{ font-weight:800; line-height:1.35; color:#1e293b; margin-bottom:6px; }}
-      .match-badge {{ display:inline-block; padding:5px 10px; border-radius:999px; font-size:12px; font-weight:800; }}
-      .match-badge-exact {{ background:#e8f7ee; color:#15803d; }}
-      .match-badge-linked {{ background:#e8f1ff; color:#1d4ed8; }}
-      .match-badge-similar {{ background:#fff0df; color:#c26a00; }}
-      .sale-col {{ font-weight:800; }}
-      .selected-col {{ background:#eef4ff; border-left:1px solid #c7d7ff; border-right:1px solid #c7d7ff; font-weight:900; color:#315efb; }}
-      .copy-btn {{ border:none; background:#e9efff; color:#315efb; font-weight:800; border-radius:14px; padding:11px 14px; cursor:pointer; min-width:130px; }}
-    </style></head><body>
-      <div class='wrap'><table>
-        <thead><tr><th>Артикул</th><th>Название</th><th>Производитель</th><th>Свободно</th><th>Всего</th><th>Цена продажи</th><th>{html.escape(selected_label)}</th><th>Действие</th></tr></thead>
-        <tbody>{''.join(rows_html)}</tbody>
-      </table></div>
-    </body></html>
-    """
-    height = min(max(170, 66 + len(df) * 74), 900)
-    components.html(table_html, height=height, scrolling=True)
+def parse_merlion_qty(value: Any) -> float:
+    text = compact_text(value)
+    if not text:
+        return 0.0
+    try:
+        return float(str(value).replace(",", "."))
+    except Exception:
+        pass
+    if text in {"+++", "МНОГО"}:
+        return 10.0
+    if text in {"+", "МАЛО"}:
+        return 1.0
+    return 0.0
 
 
-def to_excel_bytes(df: pd.DataFrame, price_mode: str, round100: bool, custom_discount: float) -> bytes:
-    label = current_price_label(price_mode, custom_discount)
-    export_df = pd.DataFrame(
-        {
-            "Артикул": df["article"],
-            "Название": df["name"],
-            "Производитель": df["brand"],
-            "Свободно": df["free_qty"],
-            "Всего": df["total_qty"],
-            "Цена продажи": df["sale_price"],
-            label: df.apply(lambda row: get_selected_price_raw(row, price_mode, round100, custom_discount), axis=1),
+def standardize_distributor_result(data: pd.DataFrame, distributor: str) -> pd.DataFrame:
+    data = data.copy()
+    if "alt_article" not in data.columns:
+        data["alt_article"] = ""
+    if "alt_article_norm" not in data.columns:
+        data["alt_article_norm"] = data["alt_article"].map(normalize_article)
+    if "quality_flags" not in data.columns:
+        data["quality_flags"] = ""
+
+    data["article"] = data["article"].fillna("").astype(str).map(normalize_text)
+    data["article_norm"] = data["article"].map(normalize_article)
+    data["alt_article"] = data["alt_article"].fillna("").astype(str).map(normalize_text)
+    data["alt_article_norm"] = data["alt_article"].map(normalize_article)
+    data["name"] = data["name"].fillna("").astype(str).map(normalize_text)
+    data["brand"] = data["brand"].fillna("").astype(str).map(normalize_text)
+    data["quality_flags"] = data["quality_flags"].fillna("").astype(str).map(normalize_text)
+    data["free_qty"] = pd.to_numeric(data["free_qty"], errors="coerce").fillna(0)
+    data["price"] = pd.to_numeric(data["price"], errors="coerce").fillna(0)
+    data["name_tokens"] = data["name"].map(tokenize_text)
+    data["name_code_list"] = data["name"].map(extract_article_candidates_from_text)
+    data["search_blob"] = (
+        data["article"].astype(str)
+        + " " + data["alt_article"].astype(str)
+        + " " + data["name"].astype(str)
+        + " " + data["brand"].astype(str)
+        + " " + data["quality_flags"].astype(str)
+    ).map(contains_text)
+    data["distributor"] = distributor
+    data = data[(data["article_norm"] != "") | (data["alt_article_norm"] != "")].copy()
+    data = data[data["price"] > 0].copy()
+    return data.reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False)
+def load_resource_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
+    df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Price", header=1)
+    df = df.dropna(how="all")
+    data = pd.DataFrame()
+    data["article"] = df.get("Артикул", "").map(normalize_text)
+    data["alt_article"] = df.get("Артикул производителя", "").map(normalize_text)
+    data["name"] = df.get("Номенклатура", "").map(normalize_text)
+    data["brand"] = df.get("Производитель", "").map(normalize_text)
+    data["price"] = pd.to_numeric(df.get("Цена, руб", 0), errors="coerce")
+    data["free_qty"] = df.get("Доступно Москва", 0).map(parse_resource_qty)
+    data["quality_flags"] = collect_quality_flag_text(df)
+    data = standardize_distributor_result(data, "Ресурс")
+    data["is_original"] = ~data.apply(lambda r: is_negative_substitute_text(r["article"], r["alt_article"], r["name"], r["brand"]), axis=1)
+    data["is_good_offer"] = data["is_original"] & ~data.apply(row_has_bad_offer_markers, axis=1) & ~data.apply(row_explicitly_flagged_bad, axis=1)
+    data = data[data["free_qty"] > 0].copy()
+    return data.reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False)
+def load_ocs_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
+    df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Наличие и цены")
+    df = df.dropna(how="all")
+    data = pd.DataFrame()
+    data["article"] = df.get("Каталожный номер", "").map(normalize_text)
+    data["name"] = df.get("Наименование", "").map(normalize_text)
+    data["brand"] = df.get("Производитель", "").map(normalize_text)
+    data["price"] = pd.to_numeric(df.get("Цена", 0), errors="coerce")
+    data["free_qty"] = df.get("Доступно для резерва", 0).map(parse_ocs_qty)
+    data["quality_flags"] = collect_quality_flag_text(df)
+    data = standardize_distributor_result(data, "OCS")
+    data["is_original"] = ~data.apply(lambda r: is_negative_substitute_text(r["article"], r["name"], r["brand"]), axis=1)
+    data["is_good_offer"] = data["is_original"] & ~data.apply(row_has_bad_offer_markers, axis=1) & ~data.apply(row_explicitly_flagged_bad, axis=1)
+    data = data[data["free_qty"] > 0].copy()
+    return data.reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False)
+def load_merlion_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
+    df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Price List", header=4)
+    df = df.dropna(how="all")
+    data = pd.DataFrame()
+    data["article"] = df.get("Код производителя", "").map(normalize_text)
+    data["alt_article"] = df.get("Доп. Номер", "").map(normalize_text) if "Доп. Номер" in df.columns else ""
+    data["name"] = df.get("Наименование", "").map(normalize_text)
+    data["brand"] = df.get("Бренд", "").map(normalize_text)
+    data["group2"] = df.get("Группа 2", "").map(normalize_text) if "Группа 2" in df.columns else ""
+    data["price"] = pd.to_numeric(df.get("Цена(руб)", 0), errors="coerce")
+    data["free_qty"] = df.get("Доступно", 0).map(parse_merlion_qty)
+    data["quality_flags"] = collect_quality_flag_text(df)
+    data = standardize_distributor_result(data, "Мерлион")
+    is_original_group = data["group2"].astype(str).str.upper().str.contains("ОРИГИН") if "group2" in data.columns else True
+    data["is_original"] = is_original_group & ~data.apply(lambda r: is_negative_substitute_text(r["article"], r["alt_article"], r["name"], r["brand"], r.get("group2", "")), axis=1)
+    data["is_good_offer"] = data["is_original"] & ~data.apply(row_has_bad_offer_markers, axis=1) & ~data.apply(row_explicitly_flagged_bad, axis=1)
+    data = data[data["free_qty"] > 0].copy()
+    return data.reset_index(drop=True)
+
+
+def distributor_sources_ready() -> bool:
+    for key in ["resource_df", "ocs_df", "merlion_df"]:
+        df = st.session_state.get(key)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return True
+    return False
+
+
+def brand_match(catalog_brand: str, dist_brand: str) -> bool:
+    a = compact_text(catalog_brand)
+    b = compact_text(dist_brand)
+    if not a or not b:
+        return True
+    return a in b or b in a
+
+
+def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df.iloc[0:0].copy()
+
+    working = df.copy()
+    if "is_good_offer" in working.columns:
+        working = working[working["is_good_offer"] == True].copy()
+    if working.empty:
+        return working
+
+    exact = working[(working["article_norm"] == token_norm) | (working["alt_article_norm"] == token_norm)].copy()
+    if not exact.empty:
+        exact["_match_rank"] = 0
+        return exact
+
+    article_contains = working[
+        (working["article_norm"].str.contains(re.escape(token_norm), na=False, regex=True))
+        | (working["alt_article_norm"].str.contains(re.escape(token_norm), na=False, regex=True))
+        | ((token_norm != own_article_norm) & (
+            working["article_norm"].str.contains(re.escape(own_article_norm), na=False, regex=True)
+            | working["alt_article_norm"].str.contains(re.escape(own_article_norm), na=False, regex=True)
+        ))
+    ].copy()
+    if not article_contains.empty:
+        article_contains["_match_rank"] = 1
+        return article_contains
+
+    if looks_like_article_token(token_norm) or looks_like_article_token(own_article_norm):
+        return working.iloc[0:0].copy()
+
+    linked = working[working["name_code_list"].apply(lambda codes: token_norm in codes or own_article_norm in codes if isinstance(codes, list) else False)].copy()
+    if not linked.empty:
+        linked["_match_rank"] = 2
+        return linked
+
+    if search_mode != "Только артикул":
+        name_contains = working[working["search_blob"].str.contains(re.escape(token_norm), na=False, regex=True)].copy()
+        if not name_contains.empty:
+            name_contains["_match_rank"] = 3
+            return name_contains
+
+    return working.iloc[0:0].copy()
+
+
+def find_best_distributor_offer_for_choice(choice: dict[str, Any], token: str, search_mode: str, min_qty: float = 1.0) -> dict[str, Any] | None:
+    own_price = float(choice.get("sale_price", 0) or 0)
+    own_brand = str(choice.get("brand", "") or "")
+    own_article_norm = normalize_article(choice.get("article", ""))
+    token_norm = normalize_article(token)
+    own_is_original = not is_negative_substitute_text(choice.get("article", ""), choice.get("name", ""), choice.get("brand", ""))
+    best = None
+
+    for state_key in ["resource_df", "ocs_df", "merlion_df"]:
+        df = st.session_state.get(state_key)
+        if df is None or df.empty:
+            continue
+        cand = distributor_search_candidates(df, token_norm, own_article_norm, search_mode)
+        if cand.empty:
+            continue
+        cand = cand[cand["free_qty"].astype(float) >= float(min_qty)].copy()
+        if "is_good_offer" in cand.columns:
+            cand = cand[cand["is_good_offer"] == True].copy()
+        if cand.empty:
+            continue
+        if own_is_original:
+            orig = cand[cand["is_original"] == True].copy() if "is_original" in cand.columns else cand.copy()
+            if orig.empty:
+                continue
+            cand = orig
+        if own_brand:
+            brand_filtered = cand[cand["brand"].apply(lambda x: brand_match(own_brand, str(x)))]
+            if not brand_filtered.empty:
+                cand = brand_filtered
+        sort_cols = [c for c in ["_match_rank", "price", "free_qty", "article_norm"] if c in cand.columns]
+        ascending = [True, True, False, True][: len(sort_cols)]
+        cand = cand.sort_values(sort_cols, ascending=ascending)
+        row = cand.iloc[0]
+        price = float(row["price"])
+        if own_price > 0 and price >= own_price:
+            continue
+        offer = {
+            "distributor": str(row.get("distributor", "")),
+            "price": price,
+            "price_fmt": fmt_price(price),
+            "delta": max(0.0, own_price - price),
+            "delta_fmt": fmt_price(max(0.0, own_price - price)),
+            "article": str(row.get("article", "")),
+            "name": str(row.get("name", "")),
+            "free_qty": float(row.get("free_qty", 0) or 0),
         }
-    )
+        if own_price > 0:
+            delta_percent = ((own_price - price) / own_price) * 100.0
+            offer["delta_percent"] = delta_percent
+            offer["delta_percent_fmt"] = f"{delta_percent:.1f}".replace(".0", "")
+        if best is None or price < float(best["price"]):
+            best = offer
+    return best
+
+
+def build_distributor_compare(result_df: pd.DataFrame, search_mode: str, min_qty: float = 1.0) -> list[dict[str, Any]]:
+    if result_df is None or result_df.empty:
+        return []
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for _, row in result_df.iterrows():
+        row_key = str(row.get("article_norm") or normalize_article(row.get("article", "")))
+        if row_key in seen:
+            continue
+        seen.add(row_key)
+        choice = {
+            "article": row.get("article", ""),
+            "name": row.get("name", ""),
+            "brand": row.get("brand", ""),
+            "sale_price": float(row.get("sale_price", 0) or 0),
+            "row_key": row_key,
+        }
+        best_offer = find_best_distributor_offer_for_choice(choice, str(row.get("article", "")), search_mode, min_qty=min_qty)
+        sale_price = float(row.get("sale_price", 0) or 0)
+        out.append({
+            "row_key": row_key,
+            "article": str(row.get("article", "")),
+            "name": str(row.get("name", "")),
+            "sale_price": sale_price,
+            "sale_price_fmt": fmt_price(sale_price),
+            "best_offer": best_offer,
+        })
+    return out
+
+
+def distributor_compare_map(result_df: pd.DataFrame, search_mode: str, min_qty: float = 1.0) -> dict[str, dict[str, Any]]:
+    items = build_distributor_compare(result_df, search_mode, min_qty=min_qty)
+    out: dict[str, dict[str, Any]] = {}
+    for item in items:
+        out[str(item["row_key"])] = item
+    return out
+
+
+def build_full_distributor_report(df: pd.DataFrame, threshold_percent: float, search_mode: str, min_qty: float = 1.0) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    threshold_percent = max(0.0, min(95.0, float(threshold_percent)))
+    min_qty = max(0.0, float(min_qty))
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    for row in df.itertuples(index=False):
+        sale_price = float(getattr(row, "sale_price", 0) or 0)
+        own_free_qty = float(getattr(row, "free_qty", 0) or 0)
+        if sale_price <= 0 or own_free_qty <= 0:
+            continue
+        article = str(getattr(row, "article", "") or "")
+        name = str(getattr(row, "name", "") or "")
+        brand = str(getattr(row, "brand", "") or "")
+        choice = {
+            "article": article,
+            "name": name,
+            "brand": brand,
+            "sale_price": sale_price,
+        }
+        best_offer = find_best_distributor_offer_for_choice(choice, article, search_mode, min_qty=min_qty)
+        if not best_offer:
+            continue
+        delta = float(best_offer["delta"])
+        delta_percent = ((sale_price - float(best_offer["price"])) / sale_price) * 100.0
+        if delta_percent + 1e-9 < threshold_percent:
+            continue
+        rows.append({
+            "Артикул": article,
+            "Название": name,
+            "Производитель": brand,
+            "Наш остаток": float(getattr(row, "free_qty", 0) or 0),
+            "Наша цена": sale_price,
+            "Лучший дистрибьютер": str(best_offer.get("distributor", "")),
+            "Цена дистрибьютора": float(best_offer["price"]),
+            "Остаток дистрибьютора": float(best_offer.get("free_qty", 0) or 0),
+            "Разница, руб": delta,
+            "Разница, %": round(delta_percent, 2),
+            "Артикул дистрибьютора": str(best_offer.get("article", "")),
+            "Название дистрибьютора": str(best_offer.get("name", "")),
+        })
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    out = out.sort_values(["Разница, %", "Разница, руб", "Артикул"], ascending=[False, False, True]).reset_index(drop=True)
+    return out
+
+
+def report_to_excel_bytes(df: pd.DataFrame) -> bytes:
     bio = io.BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        export_df.to_excel(writer, index=False, sheet_name="Результаты")
+        df.to_excel(writer, index=False, sheet_name="Отчёт")
     bio.seek(0)
     return bio.read()
 
@@ -896,6 +1241,179 @@ def get_series_candidates(df: pd.DataFrame, raw_query: str, series_mode: str = "
     return {"prefix": token, "candidates": candidates}
 
 
+def build_display_df(df: pd.DataFrame, price_mode: str, round100: bool, custom_discount: float, search_mode: Optional[str] = None, min_qty: float = 1.0) -> pd.DataFrame:
+    out = df.copy()
+    out["selected_price"] = out.apply(lambda row: get_selected_price_raw(row, price_mode, round100, custom_discount), axis=1)
+    label = current_price_label(price_mode, custom_discount)
+    display_df = pd.DataFrame(
+        {
+            "Артикул": out["article"],
+            "Название": out["name"],
+            "Производитель": out["brand"],
+            "Свободно": out["free_qty"].map(fmt_qty),
+            "Всего": out["total_qty"].map(fmt_qty),
+            "Цена продажи": out["sale_price"].map(fmt_price),
+            label: out["selected_price"].map(fmt_price),
+        }
+    )
+    if search_mode and distributor_sources_ready():
+        compare_map = distributor_compare_map(df, search_mode, min_qty=min_qty)
+        best_dist = []
+        best_price = []
+        best_qty = []
+        best_delta = []
+        best_delta_pct = []
+        for _, row in df.iterrows():
+            item = compare_map.get(str(row.get("article_norm", "")), {})
+            offer = item.get("best_offer") if isinstance(item, dict) else None
+            if offer:
+                best_dist.append(str(offer.get("distributor", "")))
+                best_price.append(fmt_price(offer.get("price", 0)))
+                best_qty.append(fmt_qty(offer.get("free_qty", 0)))
+                best_delta.append(fmt_price(offer.get("delta", 0)))
+                best_delta_pct.append(str(offer.get("delta_percent_fmt", "")))
+            else:
+                best_dist.append("")
+                best_price.append("")
+                best_qty.append("")
+                best_delta.append("")
+                best_delta_pct.append("")
+        display_df["Лучший дистрибьютер"] = best_dist
+        display_df["Цена дистрибьютора"] = best_price
+        display_df["Остаток дистрибьютора"] = best_qty
+        display_df["Лучше на, руб"] = best_delta
+        display_df["Лучше на, %"] = best_delta_pct
+    return display_df
+
+
+def render_avito_open_button(url: str, label: str = "Открыть объявление") -> None:
+    if not normalize_text(url):
+        st.caption("Ссылка не найдена")
+        return
+    try:
+        st.link_button(label, url, use_container_width=True)
+    except Exception:
+        st.markdown(f'<a href="{html.escape(url, quote=True)}" target="_blank">{html.escape(label)}</a>', unsafe_allow_html=True)
+
+
+def render_copy_big_button(text_value: str, button_label: str = "📋 Скопировать весь шаблон") -> None:
+    escaped = json.dumps(text_value, ensure_ascii=False)
+    html_block = f"""
+    <div style='margin-top:8px;'>
+      <button onclick='navigator.clipboard.writeText({escaped}).then(() => {{ this.innerText = "Скопировано"; setTimeout(() => this.innerText = {json.dumps(button_label, ensure_ascii=False)}, 1200); }})'
+        style='border:none;background:#315efb;color:white;font-weight:800;border-radius:12px;padding:12px 16px;cursor:pointer;min-width:220px;'>
+        {html.escape(button_label)}
+      </button>
+    </div>
+    """
+    components.html(html_block, height=58)
+
+
+def render_results_table(df: pd.DataFrame, price_mode: str, round100: bool, custom_discount: float, distributor_map: Optional[dict[str, dict[str, Any]]] = None) -> None:
+    selected_label = current_price_label(price_mode, custom_discount)
+    rows_html = []
+    distributor_map = distributor_map or {}
+    for _, row in df.iterrows():
+        selected_raw = get_selected_price_raw(row, price_mode, round100, custom_discount)
+        selected_fmt = fmt_price(selected_raw)
+        match_type = str(row.get("match_type", ""))
+        row_key = str(row.get("article_norm", ""))
+        compare_item = distributor_map.get(row_key, {})
+        best_offer = compare_item.get("best_offer") if isinstance(compare_item, dict) else None
+
+        if match_type == "exact":
+            badge_html = "<div class='match-badge match-badge-exact'>Точное совпадение</div>"
+        elif match_type == "linked":
+            badge_html = "<div class='match-badge match-badge-linked'>Найдено по названию</div>"
+        else:
+            badge_html = "<div class='match-badge match-badge-similar'>Похожее совпадение</div>"
+
+        if best_offer:
+            qty_class = "qty-low" if float(best_offer.get("free_qty", 0) or 0) <= 1 else "qty-ok"
+            compare_html = f"""
+            <div class='best-box'>
+              <div class='best-top'>
+                <span class='dist-pill'>{html.escape(str(best_offer.get('distributor', '')))}</span>
+                <span class='delta-pill'>-{html.escape(str(best_offer.get('delta_percent_fmt', '')))}%</span>
+              </div>
+              <div class='best-price'>{html.escape(str(best_offer.get('price_fmt', '')))} руб.</div>
+              <div class='best-meta'>
+                <span class='{qty_class}'>Остаток: {html.escape(fmt_qty(best_offer.get('free_qty', 0)))} шт.</span>
+              </div>
+              <div class='best-delta'>Лучше на {html.escape(str(best_offer.get('delta_fmt', '')))} руб.</div>
+            </div>
+            """
+        else:
+            compare_html = "<div class='best-box best-box-empty'>Нет цены лучше</div>"
+
+        rows_html.append(
+            f"""
+            <tr>
+              <td><span class='article-pill'>{html.escape(str(row['article']))}</span></td>
+              <td><div class='name-cell'>{html.escape(str(row['name']))}</div>{badge_html}</td>
+              <td>{html.escape(str(row['brand'] or ''))}</td>
+              <td>{fmt_qty(row['free_qty'])}</td>
+              <td>{fmt_qty(row['total_qty'])}</td>
+              <td class='sale-col'>{fmt_price(row['sale_price'])} руб.</td>
+              <td class='selected-col'>{selected_fmt}</td>
+              <td class='compare-col'>{compare_html}</td>
+              <td><button class='copy-btn' onclick="navigator.clipboard.writeText('{selected_fmt}').then(() => {{ this.innerText = 'Скопировано'; setTimeout(() => this.innerText = 'Копировать цену', 1200); }})">Копировать цену</button></td>
+            </tr>
+            """
+        )
+    table_html = f"""
+    <!doctype html>
+    <html><head><meta charset='utf-8'/>
+    <style>
+      body {{ margin:0; font-family: Inter, Arial, sans-serif; background: transparent; }}
+      .wrap {{ background:white; border:1px solid #dbe5f1; border-radius:18px; overflow:hidden; }}
+      table {{ width:100%; border-collapse:collapse; font-size:14px; }}
+      thead th {{ background:#eef3fb; color:#334155; text-align:left; padding:14px; font-weight:800; border-bottom:1px solid #d7e1ef; }}
+      tbody td {{ padding:14px; border-bottom:1px solid #e5edf6; vertical-align:top; color:#1e293b; }}
+      tbody tr:last-child td {{ border-bottom:none; }}
+      .article-pill {{ display:inline-block; padding:6px 10px; border-radius:999px; background:#edf2ff; color:#315efb; font-weight:800; }}
+      .name-cell {{ font-weight:800; line-height:1.35; color:#1e293b; margin-bottom:6px; }}
+      .match-badge {{ display:inline-block; padding:5px 10px; border-radius:999px; font-size:12px; font-weight:800; }}
+      .match-badge-exact {{ background:#e8f7ee; color:#15803d; }}
+      .match-badge-linked {{ background:#e8f1ff; color:#1d4ed8; }}
+      .match-badge-similar {{ background:#fff0df; color:#c26a00; }}
+      .sale-col {{ font-weight:800; }}
+      .selected-col {{ background:#eef4ff; border-left:1px solid #c7d7ff; border-right:1px solid #c7d7ff; font-weight:900; color:#315efb; white-space:nowrap; }}
+      .compare-col {{ min-width:220px; }}
+      .best-box {{ background:#f8fbff; border:1px solid #d9e6ff; border-radius:16px; padding:10px 12px; min-width:190px; }}
+      .best-box-empty {{ color:#64748b; font-weight:700; text-align:center; background:#f8fafc; border-color:#e2e8f0; }}
+      .best-top {{ display:flex; justify-content:space-between; gap:8px; align-items:center; margin-bottom:6px; }}
+      .dist-pill {{ display:inline-block; padding:5px 10px; border-radius:999px; background:#e9efff; color:#315efb; font-weight:800; }}
+      .delta-pill {{ display:inline-block; padding:5px 10px; border-radius:999px; background:#e8f7ee; color:#15803d; font-weight:900; }}
+      .best-price {{ font-size:18px; font-weight:900; color:#0f2f83; line-height:1.2; margin-bottom:5px; }}
+      .best-meta {{ font-size:12px; margin-bottom:5px; }}
+      .qty-low {{ color:#c2410c; font-weight:800; }}
+      .qty-ok {{ color:#0f766e; font-weight:800; }}
+      .best-delta {{ font-size:12px; color:#64748b; }}
+      .copy-btn {{ border:none; background:#e9efff; color:#315efb; font-weight:800; border-radius:14px; padding:11px 14px; cursor:pointer; min-width:130px; }}
+    </style></head><body>
+      <div class='wrap'><table>
+        <thead><tr><th>Артикул</th><th>Название</th><th>Производитель</th><th>Свободно</th><th>Всего</th><th>Цена продажи</th><th>{html.escape(selected_label)}</th><th>Где лучше нас</th><th>Действие</th></tr></thead>
+        <tbody>{''.join(rows_html)}</tbody>
+      </table></div>
+    </body></html>
+    """
+    height = min(max(180, 70 + len(df) * 84), 1100)
+    components.html(table_html, height=height, scrolling=True)
+
+
+def to_excel_bytes(df: pd.DataFrame, price_mode: str, round100: bool, custom_discount: float, search_mode: Optional[str] = None, min_qty: float = 1.0) -> bytes:
+    export_df = build_display_df(df, price_mode, round100, custom_discount, search_mode=search_mode, min_qty=min_qty)
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Результаты")
+    bio.seek(0)
+    return bio.read()
+
+
+# ----------------
+# Стили интерфейса
+# ----------------
 st.markdown(
     """
     <style>
@@ -938,11 +1456,16 @@ st.markdown(
     .toolbar, .result-wrap { background: white; border: 1px solid #dbe5f1; border-radius: 16px; padding: 12px 14px; margin-bottom: 10px; box-shadow: 0 6px 18px rgba(15, 23, 42, .05); }
     .toolbar-title, .section-title { font-size: 18px; font-weight: 900; color:#0f172a; margin-bottom:4px; }
     .toolbar-sub, .section-sub { font-size: 12px; color:#64748b; margin-bottom:10px; }
+    .mini-chip { display:inline-block; padding:6px 10px; border-radius:999px; background:#eef4ff; color:#315efb; font-weight:800; font-size:12px; margin-right:6px; margin-bottom:6px; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
+
+# -------
+# Sidebar
+# -------
 with st.sidebar:
     st.markdown(
         """
@@ -982,6 +1505,40 @@ with st.sidebar:
             st.error(f"Ошибка файла Авито: {exc}")
     avito_caption = st.session_state.get("avito_name", "ещё не загружен")
     st.markdown(f'<div class="sidebar-status">Авито: {html.escape(avito_caption)}</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-title">Дистрибьютеры</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-note">Добавлен перенос логики сравнения цен: только оригиналы, только хорошие позиции, только товар в наличии.</div>', unsafe_allow_html=True)
+    resource_uploaded = st.file_uploader("Ресурс", type=["xlsx", "xlsm"], key="resource_uploader")
+    if resource_uploaded is not None:
+        try:
+            st.session_state.resource_df = load_resource_file(resource_uploaded.name, resource_uploaded.getvalue())
+            st.session_state.resource_name = resource_uploaded.name
+        except Exception as exc:
+            st.error(f"Ошибка файла Ресурс: {exc}")
+    st.markdown(f'<div class="sidebar-status">Ресурс: {html.escape(st.session_state.get("resource_name", "ещё не загружен"))}</div>', unsafe_allow_html=True)
+
+    ocs_uploaded = st.file_uploader("OCS", type=["xlsx", "xlsm"], key="ocs_uploader")
+    if ocs_uploaded is not None:
+        try:
+            st.session_state.ocs_df = load_ocs_file(ocs_uploaded.name, ocs_uploaded.getvalue())
+            st.session_state.ocs_name = ocs_uploaded.name
+        except Exception as exc:
+            st.error(f"Ошибка файла OCS: {exc}")
+    st.markdown(f'<div class="sidebar-status">OCS: {html.escape(st.session_state.get("ocs_name", "ещё не загружен"))}</div>', unsafe_allow_html=True)
+
+    merlion_uploaded = st.file_uploader("Мерлион", type=["xlsx", "xlsm"], key="merlion_uploader")
+    if merlion_uploaded is not None:
+        try:
+            st.session_state.merlion_df = load_merlion_file(merlion_uploaded.name, merlion_uploaded.getvalue())
+            st.session_state.merlion_name = merlion_uploaded.name
+        except Exception as exc:
+            st.error(f"Ошибка файла Мерлион: {exc}")
+    st.markdown(f'<div class="sidebar-status">Мерлион: {html.escape(st.session_state.get("merlion_name", "ещё не загружен"))}</div>', unsafe_allow_html=True)
+    st.number_input("Порог отчёта, %", min_value=0.0, max_value=95.0, step=1.0, key="distributor_threshold")
+    st.number_input("Мин. остаток у дистрибьютора", min_value=1.0, max_value=999999.0, step=1.0, key="distributor_min_qty")
+    st.markdown('<div class="sidebar-mini">Если у поставщика осталась 1 шт., можно поднять минимальный остаток и убрать такие хвосты из сравнения.</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
@@ -1027,6 +1584,10 @@ CF364A - 29700 🔽""",
     st.markdown('<div class="sidebar-mini">Текст сохраняется локально и останется до следующего изменения.</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
+
+# ---------
+# Верхняя панель
+# ---------
 catalog_df = st.session_state.get("catalog_df")
 file_name = st.session_state.get("catalog_name", "ещё не загружен")
 rows_count = len(catalog_df) if isinstance(catalog_df, pd.DataFrame) else 0
@@ -1038,13 +1599,17 @@ price_label = current_price_label(price_mode, custom_discount)
 
 st.markdown(f"""
 <div class="topbar"><div class="topbar-grid">
-<div class="brand-box"><div class="logo">📦</div><div><div class="brand-title">{APP_TITLE}</div><div class="brand-sub">Streamlit • поиск • шаблоны • правка цен</div></div></div>
+<div class="brand-box"><div class="logo">📦</div><div><div class="brand-title">{APP_TITLE}</div><div class="brand-sub">Streamlit • поиск • шаблоны • правка цен • сравнение с дистрибьюторами</div></div></div>
 <div class="stat-box"><div class="stat-cap">Текущий прайс</div><div class="stat-val">{html.escape(file_name)}</div></div>
 <div class="stat-box"><div class="stat-cap">Строк в каталоге</div><div class="stat-val">{rows_count}</div></div>
 <div class="stat-box"><div class="stat-cap">Режим цены</div><div class="stat-val">{html.escape(price_label)}{' • округл.' if round100 else ''}</div></div>
 </div></div>
 """, unsafe_allow_html=True)
 
+
+# ------
+# Поиск
+# ------
 st.markdown('<div class="toolbar">', unsafe_allow_html=True)
 st.markdown('<div class="toolbar-title">Поиск товара</div><div class="toolbar-sub">Можно искать по одному или нескольким артикулам. Пробелы, /, запятые и Enter тоже поддерживаются.</div>', unsafe_allow_html=True)
 
@@ -1078,7 +1643,12 @@ if find_clicked:
 current_df = st.session_state.catalog_df
 submitted_query = st.session_state.submitted_query
 result_df = st.session_state.last_result
+min_dist_qty = float(st.session_state.distributor_min_qty)
 
+
+# ----------
+# Результаты
+# ----------
 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
 st.markdown('<div class="section-title">Результаты</div><div class="section-sub">Точное совпадение — по колонке «Артикул». Найдено по названию — когда код сидит в названии той же позиции.</div>', unsafe_allow_html=True)
 
@@ -1094,13 +1664,77 @@ else:
     m2.metric("Цена", price_label)
     m3.metric("Округление", "вкл" if round100 else "выкл")
     m4.metric("Каталог", len(current_df))
-    render_results_table(result_df.head(200), price_mode, round100, custom_discount)
+
+    compare_map = distributor_compare_map(result_df, search_mode, min_qty=min_dist_qty) if distributor_sources_ready() else {}
+    if compare_map:
+        better_rows = sum(1 for item in compare_map.values() if item.get("best_offer"))
+        chips = []
+        if st.session_state.get("resource_df") is not None:
+            chips.append("<span class=\"mini-chip\">Ресурс подключён</span>")
+        if st.session_state.get("ocs_df") is not None:
+            chips.append("<span class=\"mini-chip\">OCS подключён</span>")
+        if st.session_state.get("merlion_df") is not None:
+            chips.append("<span class=\"mini-chip\">Мерлион подключён</span>")
+        st.markdown("".join(chips), unsafe_allow_html=True)
+        st.caption(f"Для найденных позиций проверяю только оригиналы, только хорошие предложения и только остатки от {fmt_qty(min_dist_qty)} шт. Где цена поставщика лучше — показываю дистрибьютора, цену, остаток и выгоду.")
+        st.metric("Где кто-то лучше нас", better_rows)
+
+    render_results_table(result_df.head(200), price_mode, round100, custom_discount, distributor_map=compare_map)
     with st.expander("Показать техническую таблицу"):
-        st.dataframe(build_display_df(result_df, price_mode, round100, custom_discount), use_container_width=True, hide_index=True, height=300)
-    st.download_button("⬇️ Скачать найденное в Excel", to_excel_bytes(result_df, price_mode, round100, custom_discount), file_name="moy_tovar_results.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.dataframe(build_display_df(result_df, price_mode, round100, custom_discount, search_mode=search_mode, min_qty=min_dist_qty), use_container_width=True, hide_index=True, height=320)
+    st.download_button(
+        "⬇️ Скачать найденное в Excel",
+        to_excel_bytes(result_df, price_mode, round100, custom_discount, search_mode=search_mode, min_qty=min_dist_qty),
+        file_name="moy_tovar_results.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 st.markdown('</div>', unsafe_allow_html=True)
 
+
+# ----------------------
+# Новый отчёт по прайсу
+# ----------------------
+st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
+st.markdown('<div class="section-title">Отчёт по всему прайсу</div><div class="section-sub">Показывает позиции, где у дистрибьютора цена ниже нашей минимум на выбранный процент. В отчёт попадают только наши позиции в наличии и только нормальные позиции поставщиков в наличии.</div>', unsafe_allow_html=True)
+if current_df is None:
+    st.info("Сначала загрузите прайс в левой панели 👈")
+elif not distributor_sources_ready():
+    st.info("Загрузите хотя бы один файл дистрибьютора: Ресурс, OCS или Мерлион.")
+else:
+    c1, c2, c3 = st.columns([1, 1, 1.5])
+    threshold_val = float(st.session_state.distributor_threshold)
+    min_qty_val = float(st.session_state.distributor_min_qty)
+    with c1:
+        st.metric("Порог", f"{fmt_qty(threshold_val)}%")
+    with c2:
+        st.metric("Мин. остаток", f"{fmt_qty(min_qty_val)} шт.")
+    with c3:
+        build_report_clicked = st.button("Показать отчёт", type="primary", use_container_width=True)
+    if build_report_clicked:
+        st.session_state.distributor_report_df = build_full_distributor_report(current_df, threshold_val, search_mode, min_qty=min_qty_val)
+
+    report_df = st.session_state.get("distributor_report_df")
+    if isinstance(report_df, pd.DataFrame) and not report_df.empty:
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Найдено строк", len(report_df))
+        s2.metric("Порог", f"{fmt_qty(threshold_val)}%")
+        s3.metric("Мин. остаток", f"{fmt_qty(min_qty_val)} шт.")
+        st.dataframe(report_df, use_container_width=True, hide_index=True, height=420)
+        st.download_button(
+            "⬇️ Скачать отчёт в Excel",
+            report_to_excel_bytes(report_df),
+            file_name="distributor_report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    elif build_report_clicked:
+        st.warning("Ничего не найдено по текущему порогу. Попробуйте снизить % или минимальный остаток.")
+st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ----------
+# Авито блок
+# ----------
 current_avito_df = st.session_state.get("avito_df")
 if isinstance(current_avito_df, pd.DataFrame) and not current_avito_df.empty and submitted_query.strip():
     avito_matches = find_avito_ads(current_avito_df, submitted_query, result_df)
@@ -1145,6 +1779,10 @@ if isinstance(current_avito_df, pd.DataFrame) and not current_avito_df.empty and
                         render_avito_open_button(str(row.get("url", "")), "Открыть объявление")
     st.markdown('</div>', unsafe_allow_html=True)
 
+
+# ---------
+# Серии
+# ---------
 series_info = get_series_candidates(current_df, submitted_query, st.session_state.series_mode) if isinstance(current_df, pd.DataFrame) and submitted_query.strip() else {"prefix": "", "candidates": []}
 series_candidates = series_info.get("candidates", []) if isinstance(series_info, dict) else []
 if current_df is not None and submitted_query.strip() and series_candidates:
@@ -1186,6 +1824,10 @@ if current_df is not None and submitted_query.strip() and series_candidates:
         st.info("По этой части артикула серия не найдена или подходящих позиций меньше двух.")
     st.markdown('</div>', unsafe_allow_html=True)
 
+
+# ----------
+# Шаблоны
+# ----------
 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
 st.markdown('<div class="section-title">Шаблон 1 — Авито / наличный расчёт</div><div class="section-sub">Авито = цена продажи -12%. Наличный = ещё -10% от цены Авито. Если товара нет по «Свободно», будет «продан».</div>', unsafe_allow_html=True)
 if current_df is None:
