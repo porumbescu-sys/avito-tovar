@@ -2515,6 +2515,69 @@ def render_sidebar_card_header(title: str, icon: str = "📁", help_text: str = 
         unsafe_allow_html=True,
     )
 
+
+def render_info_banner(title: str, text: str, icon: str = "💡", chips: Optional[list[str]] = None, tone: str = "blue") -> None:
+    chips_html = ""
+    if chips:
+        chips_html = "<div class='banner-chip-row'>" + "".join(
+            f"<span class='banner-chip'>{html.escape(chip)}</span>" for chip in chips if normalize_text(chip)
+        ) + "</div>"
+    st.markdown(
+        f"""
+        <div class="info-banner tone-{html.escape(tone)}">
+          <div class="info-banner-icon">{html.escape(icon)}</div>
+          <div class="info-banner-body">
+            <div class="info-banner-title">{html.escape(title)}</div>
+            <div class="info-banner-text">{html.escape(text)}</div>
+            {chips_html}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_action_callout(title: str, text: str, icon: str = "🧭", badges: Optional[list[str]] = None) -> None:
+    badges_html = ""
+    if badges:
+        badges_html = "<div class='callout-badges'>" + "".join(
+            f"<span class='callout-badge'>{html.escape(badge)}</span>" for badge in badges if normalize_text(badge)
+        ) + "</div>"
+    st.markdown(
+        f"""
+        <div class="action-callout">
+          <div class="action-callout-icon">{html.escape(icon)}</div>
+          <div class="action-callout-body">
+            <div class="action-callout-title">{html.escape(title)}</div>
+            <div class="action-callout-text">{html.escape(text)}</div>
+            {badges_html}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_report_summary_cards(report_df: pd.DataFrame, threshold_val: float, min_qty_val: float) -> None:
+    if report_df is None or report_df.empty:
+        return
+    max_diff = float(report_df["Разница, %"].max()) if "Разница, %" in report_df.columns else 0.0
+    avg_diff = float(report_df["Разница, %"].mean()) if "Разница, %" in report_df.columns else 0.0
+    unique_dists = sorted({normalize_text(x) for x in report_df.get("Лучший дистрибьютер", pd.Series(dtype=object)).tolist() if normalize_text(x)})
+    cards = [
+        ("📦", "Строк в отчёте", str(len(report_df)), "Сколько позиций прошли фильтр по выгоде и остатку"),
+        ("🎯", "Порог отбора", f"{fmt_qty(threshold_val)}%", "Минимальная выгода, которую вы задали для отчёта"),
+        ("🏷️", "Мин. остаток", f"{fmt_qty(min_qty_val)} шт.", "Отсекает единичные хвосты у дистрибьютеров"),
+        ("🚀", "Макс. выгода", f"{max_diff:.1f}%", "Самая сильная разница к вашей цене в текущем отчёте"),
+        ("📊", "Средняя выгода", f"{avg_diff:.1f}%", "Средний размер потенциального пересмотра по отчёту"),
+        ("🔗", "Чаще лучшие", ", ".join(unique_dists[:3]) if unique_dists else "—", "Какие дистрибьютеры чаще всего дают лучшую цену в текущей выборке"),
+    ]
+    cards_html = "".join(
+        f"<div class='summary-card'><div class='summary-card-top'><span class='summary-card-icon'>{icon}</span><span class='summary-card-label'>{label}</span></div><div class='summary-card-value'>{value}</div><div class='summary-card-note'>{note}</div></div>"
+        for icon, label, value, note in cards
+    )
+    st.markdown(f"<div class='summary-grid'>{cards_html}</div>", unsafe_allow_html=True)
+
 def render_results_table(df: pd.DataFrame, price_mode: str, round100: bool, custom_discount: float, distributor_map: Optional[dict[str, dict[str, Any]]] = None) -> None:
     selected_label = current_price_label(price_mode, custom_discount)
     rows_html = []
@@ -2738,6 +2801,45 @@ st.markdown(
     }
     @media (max-width: 700px) {
         .insight-grid, .offers-grid { grid-template-columns: 1fr; }
+    }
+    .info-banner { display:flex; gap:14px; align-items:flex-start; padding:15px 16px; margin: 6px 0 14px 0; border-radius: 18px; border: 1px solid #dbe7fb; background: linear-gradient(180deg, #fbfdff 0%, #f5f9ff 100%); box-shadow: 0 8px 18px rgba(15,23,42,.05); }
+    .info-banner-icon { width:42px; height:42px; flex:0 0 42px; border-radius: 14px; display:flex; align-items:center; justify-content:center; font-size: 20px; background: linear-gradient(180deg, #3767ff 0%, #2455ef 100%); color:#fff; box-shadow: 0 10px 18px rgba(49,94,251,.18); }
+    .info-banner-body { min-width: 0; }
+    .info-banner-title { font-size: 15px; font-weight: 900; color:#0f172a; margin-bottom: 4px; }
+    .info-banner-text { font-size: 13px; line-height: 1.55; color:#64748b; }
+    .banner-chip-row { display:flex; flex-wrap:wrap; gap:8px; margin-top: 10px; }
+    .banner-chip { display:inline-flex; align-items:center; gap:6px; padding: 6px 10px; border-radius: 999px; background:#eef4ff; border:1px solid #d8e5ff; color:#315efb; font-size: 12px; font-weight: 800; }
+    .tone-green { background: linear-gradient(180deg, #fbfffd 0%, #f2fff7 100%); border-color: #d2f1dd; }
+    .tone-green .info-banner-icon { background: linear-gradient(180deg, #16a34a 0%, #15803d 100%); box-shadow: 0 10px 18px rgba(22,163,74,.18); }
+    .tone-purple { background: linear-gradient(180deg, #fcfbff 0%, #f6f3ff 100%); border-color: #e6dcff; }
+    .tone-purple .info-banner-icon { background: linear-gradient(180deg, #7c3aed 0%, #6d28d9 100%); box-shadow: 0 10px 18px rgba(124,58,237,.18); }
+    .action-callout { display:flex; gap:14px; align-items:flex-start; padding:16px 17px; margin: 12px 0 10px 0; border-radius: 20px; background: linear-gradient(135deg, #0f172a 0%, #1d4ed8 100%); color:#ffffff; box-shadow: 0 18px 34px rgba(29,78,216,.18); position: relative; overflow:hidden; }
+    .action-callout::after { content:'✦'; position:absolute; right:16px; top:8px; font-size:42px; color: rgba(255,255,255,.08); transform: rotate(12deg); }
+    .action-callout-icon { width:46px; height:46px; flex:0 0 46px; border-radius: 15px; background: rgba(255,255,255,.16); display:flex; align-items:center; justify-content:center; font-size: 22px; }
+    .action-callout-title { font-size: 15px; font-weight: 900; margin-bottom: 4px; }
+    .action-callout-text { font-size: 13px; line-height:1.55; color: rgba(255,255,255,.9); }
+    .callout-badges { display:flex; flex-wrap:wrap; gap:8px; margin-top: 10px; }
+    .callout-badge { display:inline-flex; align-items:center; padding: 6px 10px; border-radius:999px; background: rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.14); font-size:12px; font-weight:800; color:#fff; }
+    .summary-grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 12px 0 14px 0; }
+    .summary-card { background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%); border:1px solid #dbe7fb; border-radius: 18px; padding: 14px 15px; box-shadow: 0 8px 18px rgba(15,23,42,.05); }
+    .summary-card-top { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+    .summary-card-icon { width:32px; height:32px; border-radius:12px; display:flex; align-items:center; justify-content:center; background:#eef4ff; font-size:16px; }
+    .summary-card-label { color:#64748b; font-size:12px; font-weight:800; }
+    .summary-card-value { color:#0f172a; font-size: 24px; font-weight:900; line-height:1.15; margin-bottom: 6px; }
+    .summary-card-note { color:#6b7c93; font-size:12px; line-height:1.45; }
+    div[data-testid="stExpander"] details { border:1px solid #dbe7fb; border-radius: 18px; background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%); overflow:hidden; box-shadow: 0 8px 18px rgba(15,23,42,.04); }
+    div[data-testid="stExpander"] summary { padding-top: 4px; padding-bottom: 4px; }
+    div[data-testid="stDataFrame"] { border-radius: 18px; overflow:hidden; border: 1px solid #e2e8f0; box-shadow: 0 8px 18px rgba(15,23,42,.04); }
+    .analysis-help-grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 10px 0 14px 0; }
+    .analysis-help-card { border-radius: 16px; border:1px solid #dbe7fb; background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%); padding: 12px 13px; }
+    .analysis-help-title { font-size: 13px; font-weight: 900; color:#0f172a; margin-bottom: 5px; }
+    .analysis-help-text { font-size: 12px; line-height:1.5; color:#64748b; }
+    @media (max-width: 1100px) {
+        .summary-grid, .analysis-help-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 700px) {
+        .summary-grid, .analysis-help-grid { grid-template-columns: 1fr; }
+        .info-banner, .action-callout { padding: 14px; }
     }
     </style>
     """,
@@ -2980,6 +3082,13 @@ else:
     compare_map = distributor_compare_map(result_df, search_mode, min_qty=min_dist_qty) if distributor_sources_ready() else {}
     render_results_insight_dashboard(result_df, compare_map)
     if compare_map:
+        render_info_banner(
+            "Как читать результаты сравнения",
+            "В таблице выше показывается только поставщик, который реально дешевле вас. Если блок пустой, это не всегда означает, что совпадений нет — часто это значит, что поставщики нашлись, но просто дороже вашей цены.",
+            icon="🧠",
+            chips=["пустой блок ≠ нет совпадения", "остаток уже учтён", "плохие предложения отсеяны"],
+            tone="green",
+        )
         better_rows = sum(1 for item in compare_map.values() if item.get("best_offer"))
         chips = []
         if st.session_state.get("resource_df") is not None:
@@ -2994,7 +3103,21 @@ else:
 
     render_results_table(result_df.head(200), price_mode, round100, custom_discount, distributor_map=compare_map)
     with st.expander("Показать техническую таблицу"):
-        st.dataframe(build_display_df(result_df, price_mode, round100, custom_discount, search_mode=search_mode, min_qty=min_dist_qty), use_container_width=True, hide_index=True, height=320)
+        render_info_banner(
+            "Техническая таблица для проверки логики",
+            "Этот блок нужен для разбора спорных кейсов. Здесь видно, какие алиасы использовались, что нашли Ресурс, OCS и Мерлион, и почему поставщик был лучше, дороже или отфильтрован.",
+            icon="🧪",
+            chips=["debug по источникам", "алиасы артикула", "лучший дистрибьютер и остаток"],
+            tone="purple",
+        )
+        st.markdown("""
+        <div class='analysis-help-grid'>
+          <div class='analysis-help-card'><div class='analysis-help-title'>🔎 Что смотреть первым</div><div class='analysis-help-text'>Проверь артикул, алиасы и колонку лучшего дистрибьютора. Это быстро покажет, нашёлся ли товар и есть ли цена лучше вашей.</div></div>
+          <div class='analysis-help-card'><div class='analysis-help-title'>🧱 Debug по источникам</div><div class='analysis-help-text'>Колонки debug показывают, был ли найден товар у каждого поставщика, дороже он или лучше вас, и какой код реально сработал.</div></div>
+          <div class='analysis-help-card'><div class='analysis-help-title'>🛡️ Для чего это</div><div class='analysis-help-text'>Если результат выглядит странно, именно тут проще всего понять: проблема в артикулах, фильтре качества, остатке или просто в цене.</div></div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.dataframe(build_display_df(result_df, price_mode, round100, custom_discount, search_mode=search_mode, min_qty=min_dist_qty), use_container_width=True, hide_index=True, height=360)
     st.download_button(
         "⬇️ Скачать найденное в Excel",
         to_excel_bytes(result_df, price_mode, round100, custom_discount, search_mode=search_mode, min_qty=min_dist_qty),
@@ -3004,6 +3127,12 @@ else:
     if distributor_sources_ready():
         with st.expander("Показать цены у всех"):
             render_all_distributor_prices_block(result_df, search_mode, min_dist_qty, price_mode, round100, custom_discount)
+        render_action_callout(
+            "Файл для согласования с руководителем",
+            "Этот экспорт собирает базовую аналитику по найденным товарам: ваш текущий прод, лучшую цену поставщика и поля, которые удобно дозаполнить вручную перед обсуждением новых цен.",
+            icon="🗂️",
+            badges=["артикул и количество уже заполнены", "лучшая цена дистрибьютора уже внутри", "готово для обсуждения"],
+        )
         st.download_button(
             "⬇️ Скачать анализ товара",
             build_product_analysis_workbook_bytes(result_df, search_mode, min_qty=min_dist_qty),
@@ -3030,6 +3159,13 @@ if current_df is None:
 elif not distributor_sources_ready():
     st.info("Загрузите хотя бы один файл дистрибьютора: Ресурс, OCS или Мерлион.")
 else:
+    render_info_banner(
+        "Как пользоваться отчётом по прайсу",
+        "Этот блок нужен для массового контроля цен. Он показывает только те позиции, где поставщик действительно даёт цену ниже вашей минимум на выбранный процент и при этом проходит фильтр по остатку.",
+        icon="📘",
+        chips=["поиск по всему прайсу", "учитывает порог выгоды", "отсеивает единичные остатки"],
+        tone="blue",
+    )
     c1, c2, c3 = st.columns([1, 1, 1.5])
     threshold_val = float(st.session_state.distributor_threshold)
     min_qty_val = float(st.session_state.distributor_min_qty)
@@ -3044,11 +3180,14 @@ else:
 
     report_df = st.session_state.get("distributor_report_df")
     if isinstance(report_df, pd.DataFrame) and not report_df.empty:
-        s1, s2, s3 = st.columns(3)
-        s1.metric("Найдено строк", len(report_df))
-        s2.metric("Порог", f"{fmt_qty(threshold_val)}%")
-        s3.metric("Мин. остаток", f"{fmt_qty(min_qty_val)} шт.")
-        st.dataframe(report_df, use_container_width=True, hide_index=True, height=420)
+        render_report_summary_cards(report_df, threshold_val, min_qty_val)
+        st.dataframe(report_df, use_container_width=True, hide_index=True, height=440)
+        render_action_callout(
+            "Экспорт отчёта для работы вне приложения",
+            "Скачивай файл, когда нужно быстро обсудить массовые пересмотры цен, отфильтровать позиции в Excel или передать выборку руководителю и коллегам.",
+            icon="📥",
+            badges=["массовый анализ", "готово для Excel", "цены и остатки уже внутри"],
+        )
         st.download_button(
             "⬇️ Скачать отчёт в Excel",
             report_to_excel_bytes(report_df),
