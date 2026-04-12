@@ -46,6 +46,13 @@ AVITO_COLUMN_ALIASES = {
     "url": ["Ссылка", "URL", "Ссылка на объявление", "Link"],
 }
 
+ARTICLE_REFERENCE_COLUMN_ALIASES = {
+    "brand": ["Производитель", "Бренд", "Марка", "brand"],
+    "article": ["Артикул", "Короткий артикул", "Наш артикул", "article"],
+    "manufacturer_article": ["Артикул производителя", "OEM", "OEM-код", "Код производителя", "manufacturer_article"],
+    "name": ["Номенклатура", "Наименование", "Название", "name"],
+}
+
 COLOR_KEYWORDS = [
     ("желтый", "желтый"),
     ("yellow", "желтый"),
@@ -274,8 +281,11 @@ def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, An
 
 def init_state() -> None:
     defaults = {
+        "catalog_base_df": None,
         "catalog_df": None,
         "catalog_name": "ещё не загружен",
+        "article_ref_df": None,
+        "article_ref_name": "ещё не загружен",
         "avito_df": None,
         "avito_name": "ещё не загружен",
         "resource_df": None,
@@ -606,6 +616,123 @@ def find_column(columns: list[str], candidates: list[str]) -> Optional[str]:
 def detect_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     return {key: find_column(list(df.columns), aliases) for key, aliases in COLUMN_ALIASES.items()}
 
+
+
+def detect_article_reference_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
+    return {key: find_column(list(df.columns), aliases) for key, aliases in ARTICLE_REFERENCE_COLUMN_ALIASES.items()}
+
+
+@st.cache_data(show_spinner=False)
+def load_article_reference_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
+    suffix = Path(file_name).suffix.lower()
+    bio = io.BytesIO(file_bytes)
+    if suffix == ".csv":
+        try:
+            raw = pd.read_csv(bio)
+        except UnicodeDecodeError:
+            bio.seek(0)
+            raw = pd.read_csv(bio, encoding="cp1251")
+    else:
+        raw = pd.read_excel(bio)
+
+    raw = raw.dropna(how="all")
+    mapping = detect_article_reference_columns(raw)
+    if not mapping.get("article") and not mapping.get("manufacturer_article"):
+        raise ValueError("Не удалось определить колонки справочника: нужен хотя бы 'Артикул' или 'Артикул производителя'.")
+    if not mapping.get("name"):
+        raise ValueError("Не удалось определить колонку 'Номенклатура' в справочнике.")
+
+    data = pd.DataFrame()
+    data["article"] = raw[mapping["article"]].map(normalize_text) if mapping.get("article") else ""
+    data["article_norm"] = raw[mapping["article"]].map(normalize_article) if mapping.get("article") else ""
+    data["manufacturer_article"] = raw[mapping["manufacturer_article"]].map(normalize_text) if mapping.get("manufacturer_article") else ""
+    data["manufacturer_article_norm"] = raw[mapping["manufacturer_article"]].map(normalize_article) if mapping.get("manufacturer_article") else ""
+    data["name"] = raw[mapping["name"]].map(normalize_text)
+    data["brand"] = raw.apply(
+        lambda r: normalize_or_infer_brand(r[mapping["brand"]], r[mapping["name"]]) if mapping.get("brand") else infer_brand_from_name(r[mapping["name"]]),
+        axis=1,
+    )
+    data["name_code_list"] = data["name"].map(extract_article_candidates_from_text)
+    data["ref_code_list"] = data.apply(
+        lambda row: unique_norm_codes([row.get("article", ""), row.get("manufacturer_article", ""), *(row.get("name_code_list", []) or [])]),
+        axis=1,
+    )
+    data["is_negative"] = data.apply(
+        lambda row: is_negative_substitute_text(row.get("article", ""), row.get("manufacturer_article", ""), row.get("name", ""), row.get("brand", "")),
+        axis=1,
+    )
+    data = data[data["ref_code_list"].map(lambda x: isinstance(x, list) and len(x) > 0)].copy()
+    data = data[data["is_negative"] != True].copy()
+    data = data.reset_index(drop=True)
+    return data
+
+
+def build_article_reference_lookup(reference_df: pd.DataFrame) -> dict[str, list[int]]:
+    lookup: dict[str, list[int]] = {}
+    if reference_df is None or reference_df.empty:
+        return lookup
+    for idx, row in reference_df.iterrows():
+        for code in row.get("ref_code_list", []) or []:
+            norm = normalize_article(code)
+            if not norm:
+                continue
+            lookup.setdefault(norm, []).append(int(idx))
+    return lookup
+
+
+def expand_catalog_codes_with_reference(catalog_df: pd.DataFrame | None, reference_df: pd.DataFrame | None) -> pd.DataFrame | None:
+    if catalog_df is None:
+        return None
+    if reference_df is None or reference_df.empty:
+        out = catalog_df.copy()
+        if "reference_code_list" not in out.columns:
+            out["reference_code_list"] = [[] for _ in range(len(out))]
+        return out
+
+    ref_lookup = build_article_reference_lookup(reference_df)
+    out = catalog_df.copy()
+
+    def _expand_row(row: pd.Series) -> pd.Series:
+        base_codes = unique_norm_codes(row.get("all_code_list", []) or [row.get("article", ""), *(row.get("name_code_list", []) or [])])
+        if not base_codes:
+            row["reference_code_list"] = []
+            row["all_code_list"] = base_codes
+            return row
+        if is_negative_substitute_text(row.get("article", ""), row.get("name", ""), row.get("brand", "")):
+            row["reference_code_list"] = []
+            row["all_code_list"] = base_codes
+            return row
+
+        own_brand = str(row.get("brand", "") or "")
+        matched_ref_rows: set[int] = set()
+        for code in base_codes:
+            for ref_idx in ref_lookup.get(code, []):
+                ref_row = reference_df.iloc[ref_idx]
+                ref_brand = str(ref_row.get("brand", "") or "")
+                if own_brand and ref_brand and not brand_match(own_brand, ref_brand):
+                    continue
+                matched_ref_rows.add(int(ref_idx))
+
+        ref_codes: list[str] = []
+        for ref_idx in sorted(matched_ref_rows):
+            ref_row = reference_df.iloc[ref_idx]
+            ref_codes.extend(ref_row.get("ref_code_list", []) or [])
+
+        row["reference_code_list"] = unique_norm_codes(ref_codes)
+        row["all_code_list"] = unique_norm_codes([*base_codes, *row["reference_code_list"]])
+        return row
+
+    out = out.apply(_expand_row, axis=1)
+    return out
+
+
+def rebuild_catalog_effective_df() -> None:
+    base_df = st.session_state.get("catalog_base_df")
+    ref_df = st.session_state.get("article_ref_df")
+    if isinstance(base_df, pd.DataFrame):
+        st.session_state.catalog_df = expand_catalog_codes_with_reference(base_df, ref_df)
+    else:
+        st.session_state.catalog_df = None
 
 @st.cache_data(show_spinner=False)
 def load_price_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
@@ -2142,6 +2269,7 @@ def build_display_df(df: pd.DataFrame, price_mode: str, round100: bool, custom_d
             "Всего": out["total_qty"].map(fmt_qty),
             "Цена продажи": out["sale_price"].map(fmt_price),
             label: out["selected_price"].map(fmt_price),
+            "Алиасы из справочника": out.get("reference_code_list", pd.Series([[] for _ in range(len(out))])).map(lambda x: ", ".join(x) if isinstance(x, list) and x else ""),
         }
     )
     if search_mode and distributor_sources_ready():
@@ -2219,6 +2347,56 @@ def render_copy_big_button(text_value: str, button_label: str = "📋 Скопи
     """
     components.html(html_block, height=58)
 
+
+
+
+def render_block_header(title: str, subtitle: str = "", icon: str = "📦", help_text: str = "") -> None:
+    tooltip_html = ""
+    if normalize_text(help_text):
+        tooltip_html = (
+            '<div class="block-help-wrap">'
+            '<div class="block-help">?</div>'
+            f'<div class="block-tooltip">{html.escape(help_text)}</div>'
+            '</div>'
+        )
+    st.markdown(
+        f"""
+        <div class="block-header">
+          <div class="block-header-main">
+            <div class="block-icon">{html.escape(icon)}</div>
+            <div class="block-title-wrap">
+              <div class="section-title">{html.escape(title)}</div>
+              <div class="section-sub">{html.escape(subtitle)}</div>
+            </div>
+          </div>
+          {tooltip_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_sidebar_card_header(title: str, icon: str = "📁", help_text: str = "") -> None:
+    tooltip_html = ""
+    if normalize_text(help_text):
+        tooltip_html = (
+            '<div class="sidebar-card-help-wrap">'
+            '<div class="sidebar-card-help">?</div>'
+            f'<div class="sidebar-card-tooltip">{html.escape(help_text)}</div>'
+            '</div>'
+        )
+    st.markdown(
+        f"""
+        <div class="sidebar-card-header">
+          <div class="sidebar-card-header-main">
+            <div class="sidebar-card-icon">{html.escape(icon)}</div>
+            <div class="sidebar-card-title">{html.escape(title)}</div>
+          </div>
+          {tooltip_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 def render_results_table(df: pd.DataFrame, price_mode: str, round100: bool, custom_discount: float, distributor_map: Optional[dict[str, dict[str, Any]]] = None) -> None:
     selected_label = current_price_label(price_mode, custom_discount)
@@ -2338,11 +2516,6 @@ st.markdown(
     .sidebar-brand-logo { width:44px; height:44px; border-radius:14px; background: linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.08)); display:flex; align-items:center; justify-content:center; box-shadow: inset 0 1px 0 rgba(255,255,255,.15); font-size:22px; }
     .sidebar-brand-title { font-size: 1.22rem; font-weight: 900; line-height:1.05; color:#ffffff !important; }
     .sidebar-brand-sub { font-size: .82rem; color: #c7d6ff !important; margin-top: 4px; }
-    .sidebar-card { background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.04)); border: 1px solid rgba(255,255,255,.12); border-radius: 20px; padding: 1rem 0.95rem 0.95rem 0.95rem; margin: 0.95rem 0 1.05rem 0; box-shadow: 0 10px 22px rgba(2, 8, 23, .22), inset 0 1px 0 rgba(255,255,255,.05); }
-    .sidebar-card-title { font-size: 1.02rem; font-weight: 900; color:#ffffff !important; margin-bottom: .45rem; }
-    .sidebar-card-note { font-size: .78rem; line-height: 1.45; color:#c7d6ff !important; margin-bottom: .6rem; }
-    .sidebar-status { background: rgba(7, 31, 74, .9); border: 1px solid rgba(255,255,255,.06); border-radius: 14px; padding: .72rem .78rem; color:#ffffff !important; font-weight: 800; margin-top: .55rem; }
-    .sidebar-mini { font-size:.78rem; color:#c7d6ff !important; line-height:1.45; margin-top:.65rem; }
     [data-testid="stSidebar"] .stFileUploader section { background: rgba(255,255,255,0.03) !important; border: 1px dashed rgba(255,255,255,0.22) !important; border-radius: 16px !important; padding: 0.6rem !important; }
     [data-testid="stSidebar"] .stFileUploader button, [data-testid="stSidebar"] .stFileUploader button[kind], [data-testid="stSidebar"] .stFileUploader [data-testid="stFileUploaderDropzone"] button, [data-testid="stSidebar"] .stFileUploader [data-testid="baseButton-secondary"], [data-testid="stSidebar"] .stFileUploader [data-baseweb="button"] { background: linear-gradient(180deg, #3767ff 0%, #2455ef 100%) !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; border: none !important; border-radius: 14px !important; font-weight: 800 !important; opacity: 1 !important; box-shadow: 0 10px 20px rgba(49, 94, 251, 0.30) !important; }
     [data-testid="stSidebar"] .stFileUploader small, [data-testid="stSidebar"] .stFileUploader span, [data-testid="stSidebar"] .stFileUploader label { color: #dbe6ff !important; -webkit-text-fill-color: #dbe6ff !important; opacity: 1 !important; }
@@ -2364,10 +2537,32 @@ st.markdown(
     .stat-box { background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.12); border-radius: 14px; padding: 10px 12px; min-height: 70px; }
     .stat-cap { font-size: 12px; opacity: .82; margin-bottom: 4px; }
     .stat-val { font-size: 16px; font-weight: 800; }
-    .toolbar, .result-wrap { background: white; border: 1px solid #dbe5f1; border-radius: 16px; padding: 12px 14px; margin-bottom: 10px; box-shadow: 0 6px 18px rgba(15, 23, 42, .05); }
-    .toolbar-title, .section-title { font-size: 18px; font-weight: 900; color:#0f172a; margin-bottom:4px; }
-    .toolbar-sub, .section-sub { font-size: 12px; color:#64748b; margin-bottom:10px; }
-    .mini-chip { display:inline-block; padding:6px 10px; border-radius:999px; background:#eef4ff; color:#315efb; font-weight:800; font-size:12px; margin-right:6px; margin-bottom:6px; }
+    .toolbar, .result-wrap { position: relative; background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%); border: 1px solid #dbe5f1; border-radius: 20px; padding: 14px 16px 16px 16px; margin-bottom: 14px; box-shadow: 0 8px 22px rgba(15, 23, 42, .06); overflow: hidden; }
+    .toolbar::before, .result-wrap::before { content: ''; position: absolute; inset: 0 auto auto 0; width: 100%; height: 4px; background: linear-gradient(90deg, #315efb 0%, #79a6ff 100%); opacity: .9; }
+    .block-header { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; padding: 2px 0 12px 0; margin-bottom: 12px; border-bottom: 1px solid #e7eef9; }
+    .block-header-main { display:flex; align-items:flex-start; gap:12px; min-width: 0; }
+    .block-icon { width: 42px; height: 42px; border-radius: 14px; background: linear-gradient(180deg, #3767ff 0%, #2455ef 100%); color: #ffffff; display:flex; align-items:center; justify-content:center; font-size: 22px; flex: 0 0 42px; box-shadow: 0 10px 18px rgba(49, 94, 251, .22); }
+    .block-title-wrap { min-width: 0; }
+    .toolbar-title, .section-title { font-size: 21px; font-weight: 900; color:#0f172a; margin:0 0 4px 0; line-height:1.15; letter-spacing:-0.01em; }
+    .toolbar-sub, .section-sub { font-size: 12.8px; color:#64748b; margin:0; line-height:1.5; max-width: 980px; }
+    .block-help-wrap { position: relative; flex: 0 0 auto; }
+    .block-help { display:flex; align-items:center; justify-content:center; width: 30px; height: 30px; border-radius: 999px; border: 1px solid #cfe0ff; background: #f3f7ff; color: #315efb; font-size: 15px; font-weight: 900; cursor: help; user-select: none; box-shadow: inset 0 1px 0 rgba(255,255,255,.8); }
+    .block-help:hover { background: #eaf1ff; }
+    .block-tooltip { position: absolute; right: 0; top: 38px; width: 320px; max-width: min(320px, 78vw); padding: 12px 13px; border-radius: 14px; background: #0f172a; color: #f8fbff; font-size: 12.5px; line-height: 1.45; box-shadow: 0 16px 34px rgba(15, 23, 42, .28); opacity: 0; transform: translateY(6px); pointer-events: none; transition: opacity .18s ease, transform .18s ease; z-index: 20; }
+    .block-tooltip::before { content: ''; position: absolute; top: -6px; right: 10px; width: 12px; height: 12px; background: #0f172a; transform: rotate(45deg); }
+    .block-help-wrap:hover .block-tooltip { opacity: 1; transform: translateY(0); }
+    .sidebar-card { background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.045)); border: 1px solid rgba(255,255,255,.13); border-radius: 22px; padding: 1rem 0.95rem 0.95rem 0.95rem; margin: 0.95rem 0 1.05rem 0; box-shadow: 0 12px 26px rgba(2, 8, 23, .24), inset 0 1px 0 rgba(255,255,255,.06); position: relative; overflow: hidden; }
+    .sidebar-card::before { content: ''; position: absolute; inset: 0 auto auto 0; width: 100%; height: 3px; background: linear-gradient(90deg, rgba(111,163,255,.95) 0%, rgba(49,94,251,.95) 100%); opacity: .95; }
+    .sidebar-card-header { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom: .6rem; padding-bottom: .55rem; border-bottom: 1px solid rgba(255,255,255,.10); }
+    .sidebar-card-header-main { display:flex; align-items:center; gap:10px; min-width:0; }
+    .sidebar-card-icon { width:34px; height:34px; border-radius:12px; background: linear-gradient(180deg, rgba(255,255,255,.22), rgba(255,255,255,.10)); display:flex; align-items:center; justify-content:center; font-size:17px; flex:0 0 34px; box-shadow: inset 0 1px 0 rgba(255,255,255,.15); }
+    .sidebar-card-title { font-size: 1.01rem; font-weight: 900; color:#ffffff !important; line-height:1.15; margin:0; }
+    .sidebar-card-help-wrap { position: relative; flex: 0 0 auto; }
+    .sidebar-card-help { display:flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:999px; border:1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.08); color:#ffffff !important; font-size:12px; font-weight:900; cursor:help; user-select:none; }
+    .sidebar-card-tooltip { position:absolute; right:0; top:30px; width:250px; max-width:min(250px, 66vw); padding:10px 11px; border-radius:12px; background:#f8fbff; color:#0f172a !important; font-size:12px; line-height:1.45; box-shadow:0 16px 34px rgba(2, 8, 23, .30); opacity:0; transform:translateY(6px); pointer-events:none; transition:opacity .18s ease, transform .18s ease; z-index:35; }
+    .sidebar-card-tooltip::before { content:''; position:absolute; top:-6px; right:9px; width:12px; height:12px; background:#f8fbff; transform:rotate(45deg); }
+    .sidebar-card-help-wrap:hover .sidebar-card-tooltip { opacity:1; transform:translateY(0); }
+    .mini-chip { display:inline-flex; align-items:center; gap:6px; padding:7px 11px; border-radius:999px; background:#eef4ff; color:#315efb; font-weight:800; font-size:12px; margin-right:6px; margin-bottom:6px; border: 1px solid #d6e3ff; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -2392,12 +2587,13 @@ with st.sidebar:
     )
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-card-title">Загрузить прайс</div>', unsafe_allow_html=True)
+    render_sidebar_card_header("Загрузить прайс", "📥", "Основной прайс каталога. Из него приложение берёт артикул, название, остаток и цену продажи.")
     uploaded = st.file_uploader("Загрузить прайс", type=["xlsx", "xls", "xlsm", "csv"], label_visibility="collapsed")
     if uploaded is not None:
         try:
-            st.session_state.catalog_df = load_price_file(uploaded.name, uploaded.getvalue())
+            st.session_state.catalog_base_df = load_price_file(uploaded.name, uploaded.getvalue())
             st.session_state.catalog_name = uploaded.name
+            rebuild_catalog_effective_df()
         except Exception as exc:
             st.error(f"Ошибка: {exc}")
     file_caption = st.session_state.get("catalog_name", "Файл ещё не выбран")
@@ -2405,7 +2601,25 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-card-title">Загрузить файл Авито</div>', unsafe_allow_html=True)
+    render_sidebar_card_header("Справочник артикулов", "🧠", "Дополнительный словарь коротких и длинных артикулов. Используется в самом конце, если обычного поиска и кодов из названия недостаточно.")
+    st.markdown('<div class="sidebar-card-note">Необязательный файл. Используется в самом конце как словарь соответствий между короткими и длинными артикулами.</div>', unsafe_allow_html=True)
+    article_ref_uploaded = st.file_uploader("Загрузить справочник артикулов", type=["xlsx", "xls", "xlsm", "csv"], key="article_ref_uploader", label_visibility="collapsed")
+    if article_ref_uploaded is not None:
+        try:
+            st.session_state.article_ref_df = load_article_reference_file(article_ref_uploaded.name, article_ref_uploaded.getvalue())
+            st.session_state.article_ref_name = article_ref_uploaded.name
+            rebuild_catalog_effective_df()
+            submitted_query = normalize_text(st.session_state.get("submitted_query", ""))
+            if submitted_query and isinstance(st.session_state.catalog_df, pd.DataFrame):
+                st.session_state.last_result = perform_search(st.session_state.catalog_df, submitted_query, st.session_state.get("search_mode", "Только артикул"))
+        except Exception as exc:
+            st.error(f"Ошибка справочника: {exc}")
+    article_ref_caption = st.session_state.get("article_ref_name", "ещё не загружен")
+    st.markdown(f'<div class="sidebar-status">Справочник: {html.escape(article_ref_caption)}</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
+    render_sidebar_card_header("Загрузить файл Авито", "🛒", "Файл с объявлениями Авито. Помогает быстро понять, есть ли у найденной позиции действующее объявление и открыть его.")
     st.markdown('<div class="sidebar-card-note">Файл с колонкой <b>Название объявления</b>. Ссылки можно читать прямо из гиперссылок Excel.</div>', unsafe_allow_html=True)
     avito_uploaded = st.file_uploader("Загрузить файл Авито", type=["xlsx", "xlsm", "csv"], key="avito_uploader", label_visibility="collapsed")
     if avito_uploaded is not None:
@@ -2419,7 +2633,7 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-card-title">Дистрибьютеры</div>', unsafe_allow_html=True)
+    render_sidebar_card_header("Дистрибьютеры", "🏷️", "Здесь подключаются прайсы Ресурс, OCS и Мерлион. Блок сравнивает только нормальные оригинальные позиции и только то, что есть в наличии.")
     st.markdown('<div class="sidebar-card-note">Добавлен перенос логики сравнения цен: только оригиналы, только хорошие позиции, только товар в наличии.</div>', unsafe_allow_html=True)
     resource_uploaded = st.file_uploader("Ресурс", type=["xlsx", "xlsm"], key="resource_uploader")
     if resource_uploaded is not None:
@@ -2453,7 +2667,7 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-card-title">Быстрая правка цен</div>', unsafe_allow_html=True)
+    render_sidebar_card_header("Быстрая правка цен", "✏️", "Локально обновляет цены в загруженном прайсе по вставленному списку артикулов и новых цен. Удобно для быстрых правок без изменения исходного файла.")
     st.markdown('<div class="sidebar-card-note">Вставьте строки вида <b>CE278A 8900</b>, <b>CF364A - 29700</b> или прямо текст из Telegram.</div>', unsafe_allow_html=True)
     st.text_area(
         "Вставьте строки вроде: CE278A 8900",
@@ -2465,13 +2679,14 @@ CE278AC 7900
 CF364A - 29700 🔽""",
     )
     if st.button("Править цены в прайсе", use_container_width=True):
-        if isinstance(st.session_state.catalog_df, pd.DataFrame):
-            updated_df, patch_message = apply_price_updates(st.session_state.catalog_df, st.session_state.price_patch_input)
-            st.session_state.catalog_df = updated_df
+        if isinstance(st.session_state.catalog_base_df, pd.DataFrame):
+            updated_base_df, patch_message = apply_price_updates(st.session_state.catalog_base_df, st.session_state.price_patch_input)
+            st.session_state.catalog_base_df = updated_base_df
+            rebuild_catalog_effective_df()
             st.session_state.patch_message = patch_message
             submitted_query = normalize_text(st.session_state.get("submitted_query", ""))
-            if submitted_query:
-                st.session_state.last_result = perform_search(updated_df, submitted_query, st.session_state.get("search_mode", "Только артикул"))
+            if submitted_query and isinstance(st.session_state.catalog_df, pd.DataFrame):
+                st.session_state.last_result = perform_search(st.session_state.catalog_df, submitted_query, st.session_state.get("search_mode", "Только артикул"))
         else:
             st.session_state.patch_message = "Сначала загрузите прайс."
     if st.session_state.patch_message:
@@ -2481,7 +2696,7 @@ CF364A - 29700 🔽""",
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-card-title">⚙️ Настройки</div>', unsafe_allow_html=True)
+    render_sidebar_card_header("Настройки", "⚙️", "Управляет режимом поиска, основной ценой, пользовательской скидкой и округлением. На ядро поиска не влияет, только на отображение и шаблоны.")
     st.selectbox("Режим поиска", ["Только артикул", "Умный", "Артикул + название + бренд"], key="search_mode")
     st.radio("Какая цена главная", ["-12%", "-20%", "Своя скидка"], key="price_mode")
     st.number_input("Своя скидка, %", min_value=0.0, max_value=99.0, step=1.0, key="custom_discount")
@@ -2489,7 +2704,7 @@ CF364A - 29700 🔽""",
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-card-title">Текст шаблона 1</div>', unsafe_allow_html=True)
+    render_sidebar_card_header("Текст шаблона 1", "🧾", "Постоянный хвост для первого шаблона. Здесь можно хранить адрес, условия работы и доставку — они подставляются автоматически в конец шаблона.")
     st.markdown('<div class="sidebar-card-note">Этот текст добавляется один раз в конце шаблона 1. Хэштеги по артикулам подставляются автоматически.</div>', unsafe_allow_html=True)
     st.text_area("Текст шаблона 1", key="template1_footer", height=170, label_visibility="collapsed")
     st.markdown('<div class="sidebar-mini">Текст сохраняется локально и останется до следующего изменения.</div>', unsafe_allow_html=True)
@@ -2522,7 +2737,12 @@ st.markdown(f"""
 # Поиск
 # ------
 st.markdown('<div class="toolbar">', unsafe_allow_html=True)
-st.markdown('<div class="toolbar-title">Поиск товара</div><div class="toolbar-sub">Можно искать по одному или нескольким артикулам. Пробелы, /, запятые и Enter тоже поддерживаются.</div>', unsafe_allow_html=True)
+render_block_header(
+    "Поиск товара",
+    "Можно искать по одному или нескольким артикулам. Пробелы, /, запятые и Enter тоже поддерживаются.",
+    icon="🔎",
+    help_text="Основной блок поиска по вашему прайсу. Сначала ищет точное совпадение по артикулу, затем связанные коды из названия и только потом — более мягкие варианты, если они разрешены режимом поиска.",
+)
 
 with st.form("search_form", clear_on_submit=False):
     search_value = st.text_area(
@@ -2561,7 +2781,12 @@ min_dist_qty = float(st.session_state.distributor_min_qty)
 # Результаты
 # ----------
 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-st.markdown('<div class="section-title">Результаты</div><div class="section-sub">Точное совпадение — по колонке «Артикул». Найдено по названию — когда код сидит в названии той же позиции.</div>', unsafe_allow_html=True)
+render_block_header(
+    "Результаты",
+    "Точное совпадение — по колонке «Артикул». Найдено по названию — когда код сидит в названии той же позиции.",
+    icon="📊",
+    help_text="Здесь показываются найденные позиции из вашего прайса. Если подключены дистрибьютеры, рядом появляется блок «Где лучше нас» с лучшей более дешёвой ценой поставщика, остатком и выгодой.",
+)
 
 if current_df is None:
     st.info("Сначала загрузите прайс в левой панели 👈")
@@ -2617,7 +2842,12 @@ st.markdown('</div>', unsafe_allow_html=True)
 # Новый отчёт по прайсу
 # ----------------------
 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-st.markdown('<div class="section-title">Отчёт по всему прайсу</div><div class="section-sub">Показывает позиции, где у дистрибьютора цена ниже нашей минимум на выбранный процент. В отчёт попадают только наши позиции в наличии и только нормальные позиции поставщиков в наличии.</div>', unsafe_allow_html=True)
+render_block_header(
+    "Отчёт по всему прайсу",
+    "Показывает позиции, где у дистрибьютора цена ниже нашей минимум на выбранный процент. В отчёт попадают только наши позиции в наличии и только нормальные позиции поставщиков в наличии.",
+    icon="📦",
+    help_text="Массовая аналитика по всему вашему прайсу. Помогает быстро найти товары, по которым поставщики продают заметно дешевле, чем вы сейчас продаёте. Учитывает порог в процентах и минимальный остаток у дистрибьютора.",
+)
 if current_df is None:
     st.info("Сначала загрузите прайс в левой панели 👈")
 elif not distributor_sources_ready():
@@ -2660,7 +2890,12 @@ current_avito_df = st.session_state.get("avito_df")
 if isinstance(current_avito_df, pd.DataFrame) and not current_avito_df.empty and submitted_query.strip():
     avito_matches = find_avito_ads(current_avito_df, submitted_query, result_df)
     st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">Объявления Авито по этой позиции</div><div class="section-sub">Ищу совпадения по введённым артикулам и связанным кодам из найденной позиции. Ссылки читаются прямо из гиперссылок Excel.</div>', unsafe_allow_html=True)
+    render_block_header(
+        "Объявления Авито по этой позиции",
+        "Ищу совпадения по введённым артикулам и связанным кодам из найденной позиции. Ссылки читаются прямо из гиперссылок Excel.",
+        icon="🛒",
+        help_text="Этот блок показывает связанные объявления из файла Авито. Он помогает быстро открыть существующие карточки и проверить, как товар уже продаётся на площадке.",
+    )
     if avito_matches.empty:
         st.info("По текущему запросу объявление в файле Авито не найдено.")
     else:
@@ -2708,7 +2943,12 @@ series_info = get_series_candidates(current_df, submitted_query, st.session_stat
 series_candidates = series_info.get("candidates", []) if isinstance(series_info, dict) else []
 if current_df is not None and submitted_query.strip() and series_candidates:
     st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">Серия / цвета по части артикула</div><div class="section-sub">Если по части артикула находится серия, можно быстро отметить нужные позиции и добавить их в основной поиск.</div>', unsafe_allow_html=True)
+    render_block_header(
+        "Серия / цвета по части артикула",
+        "Если по части артикула находится серия, можно быстро отметить нужные позиции и добавить их в основной поиск.",
+        icon="🎨",
+        help_text="Удобный блок для серийных товаров. Если у кода есть несколько цветов, ёмкостей или версий, можно сразу выбрать нужные позиции и одним кликом добавить их в поиск.",
+    )
     st.radio("Режим серии", ["Только оригиналы", "Показывать всё"], key="series_mode", horizontal=True)
     series_info = get_series_candidates(current_df, submitted_query, st.session_state.series_mode)
     series_candidates = series_info.get("candidates", []) if isinstance(series_info, dict) else []
@@ -2750,7 +2990,12 @@ if current_df is not None and submitted_query.strip() and series_candidates:
 # Шаблоны
 # ----------
 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-st.markdown('<div class="section-title">Шаблон 1 — Авито / наличный расчёт</div><div class="section-sub">Авито = цена продажи -12%. Наличный = ещё -10% от цены Авито. Если товара нет по «Свободно», будет «продан».</div>', unsafe_allow_html=True)
+render_block_header(
+    "Шаблон 1 — Авито / наличный расчёт",
+    "Авито = цена продажи -12%. Наличный = ещё -10% от цены Авито. Если товара нет по «Свободно», будет «продан».",
+    icon="🧾",
+    help_text="Готовый текст для быстрой отправки или размещения. Автоматически считает цену для Авито и цену за наличный расчёт, а также подставляет статус «продан», если позиции нет в наличии.",
+)
 if current_df is None:
     st.info("Сначала загрузите прайс в левой панели 👈")
 elif not submitted_query.strip():
@@ -2765,7 +3010,12 @@ else:
 st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-st.markdown(f'<div class="section-title">Шаблон 2 — название + выбранная цена</div><div class="section-sub">Цена берётся из выбранного режима слева ({html.escape(price_label)}). Во второй шаблон попадают только позиции, где «Свободно» больше нуля.</div>', unsafe_allow_html=True)
+render_block_header(
+    "Шаблон 2 — название + выбранная цена",
+    f"Цена берётся из выбранного режима слева ({html.escape(price_label)}). Во второй шаблон попадают только позиции, где «Свободно» больше нуля.",
+    icon="💵",
+    help_text="Короткий шаблон для ценников, сообщений или внутренних согласований. Берёт только позиции в наличии и считает цену по текущему выбранному режиму скидки.",
+)
 if current_df is None:
     st.info("Сначала загрузите прайс в левой панели 👈")
 elif not submitted_query.strip():
