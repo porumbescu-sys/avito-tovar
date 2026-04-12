@@ -1968,6 +1968,54 @@ def all_prices_to_excel_bytes(df: pd.DataFrame) -> bytes:
 
 
 
+def status_visual_class(status: str) -> str:
+    status_text = contains_text(status)
+    if "ЛУЧШЕ" in status_text:
+        return "offer-good"
+    if "ДОРОЖЕ" in status_text:
+        return "offer-bad"
+    if "РАВНА" in status_text:
+        return "offer-neutral"
+    if "НАША ПОЗИЦИЯ" in status_text:
+        return "offer-own"
+    return "offer-muted"
+
+
+def render_results_insight_dashboard(result_df: pd.DataFrame, compare_map: dict[str, dict[str, Any]]) -> None:
+    found_count = len(result_df) if isinstance(result_df, pd.DataFrame) else 0
+    better_rows = 0
+    avg_gain = 0.0
+    gains: list[float] = []
+    connected = []
+    for key, label in [("resource_df", "Ресурс"), ("ocs_df", "OCS"), ("merlion_df", "Мерлион")]:
+        df = st.session_state.get(key)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            connected.append(label)
+    for item in (compare_map or {}).values():
+        offer = item.get("best_offer") if isinstance(item, dict) else None
+        if offer:
+            better_rows += 1
+            try:
+                gains.append(float(offer.get("delta_percent", 0) or 0))
+            except Exception:
+                pass
+    if gains:
+        avg_gain = sum(gains) / len(gains)
+
+    cards = [
+        ("🔎", "Найдено позиций", str(found_count), "Сколько строк вошло в текущий результат поиска"),
+        ("💚", "Есть цена лучше", str(better_rows), "Сколько позиций можно потенциально пересмотреть по цене"),
+        ("📈", "Средняя выгода", (f"{avg_gain:.1f}%" if gains else "—"), "Средняя выгода по тем позициям, где поставщик реально дешевле нас"),
+        ("🧩", "Подключено источников", str(len(connected)), (", ".join(connected) if connected else "Файлы дистрибьютеров пока не загружены")),
+    ]
+    cards_html = "".join(
+        f"<div class='insight-card'><div class='insight-top'><span class='insight-icon'>{icon}</span><span class='insight-label'>{label}</span></div><div class='insight-value'>{value}</div><div class='insight-note'>{note}</div></div>"
+        for icon, label, value, note in cards
+    )
+    st.markdown(f"<div class='insight-grid'>{cards_html}</div>", unsafe_allow_html=True)
+
+
+
 
 
 def build_product_analysis_df(result_df: pd.DataFrame, search_mode: str, min_qty: float = 1.0) -> pd.DataFrame:
@@ -2132,18 +2180,81 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
     st.caption("Здесь видно не только лучшую цену, но и следующую цену у других дистрибьютеров, плюс остаток. Это помогает не снижать цену из-за единичного хвоста на складе.")
     for article, group_df in all_prices_df.groupby("Артикул", sort=False):
         base_name = normalize_text(group_df.iloc[0].get("Название", ""))
-        st.markdown(f"**{article}** — {base_name}")
+        own_row = group_df[group_df["Источник"] == "Мы"].head(1)
+        own_price_html = ""
+        if not own_row.empty:
+            own_price = own_row.iloc[0].get("Цена")
+            own_qty = own_row.iloc[0].get("Остаток")
+            own_price_html = f"<div class='all-prices-own'>Наша цена: <b>{html.escape(fmt_price(own_price))} руб.</b> • Остаток: <b>{html.escape(fmt_qty(own_qty))}</b></div>"
+        st.markdown(
+            f"""
+            <div class='all-prices-head'>
+              <div>
+                <div class='all-prices-article'>{html.escape(article)}</div>
+                <div class='all-prices-name'>{html.escape(base_name)}</div>
+                {own_price_html}
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        cards: list[str] = []
+        order_rank = {"Мы": 0, "Ресурс": 1, "OCS": 2, "Мерлион": 3}
+        group_df = group_df.copy()
+        group_df["_rank"] = group_df["Источник"].map(lambda x: order_rank.get(str(x), 99))
+        group_df = group_df.sort_values(["_rank", "Цена"], na_position="last")
+        for _, rec in group_df.iterrows():
+            source = str(rec.get("Источник", "") or "")
+            price_val = rec.get("Цена")
+            qty_val = rec.get("Остаток")
+            status = str(rec.get("Статус", "") or "")
+            status_class = status_visual_class(status)
+            diff_rub = rec.get("Разница к нам, руб")
+            diff_pct = rec.get("Разница к нам, %")
+            source_article = normalize_text(rec.get("Артикул источника", ""))
+            source_name = normalize_text(rec.get("Название источника", ""))
+            if pd.notna(price_val):
+                price_html = f"{html.escape(fmt_price(price_val))} руб."
+            else:
+                price_html = "—"
+            if pd.notna(qty_val):
+                qty_html = html.escape(fmt_qty(qty_val))
+            else:
+                qty_html = "—"
+            diff_line = ""
+            if source != "Мы" and pd.notna(diff_rub):
+                sign = "+" if float(diff_rub) < 0 else ""
+                diff_pct_txt = "" if pd.isna(diff_pct) else f" • {round(float(diff_pct), 2):g}%"
+                diff_line = f"<div class='offer-meta'>Разница к нам: {sign}{html.escape(fmt_price(diff_rub))} руб.{html.escape(diff_pct_txt)}</div>"
+            article_line = f"<div class='offer-code'>{html.escape(source_article)}</div>" if source_article else ""
+            name_line = f"<div class='offer-name'>{html.escape(source_name)}</div>" if source_name else ""
+            cards.append(
+                f"""
+                <div class='offer-card {status_class}'>
+                  <div class='offer-card-top'>
+                    <div class='offer-source'>{html.escape(source)}</div>
+                    <div class='offer-status {status_class}'>{html.escape(status or 'найдено')}</div>
+                  </div>
+                  <div class='offer-price'>{price_html}</div>
+                  <div class='offer-meta'>Остаток: {qty_html}</div>
+                  {diff_line}
+                  {article_line}
+                  {name_line}
+                </div>
+                """
+            )
+        st.markdown(f"<div class='offers-grid'>{''.join(cards)}</div>", unsafe_allow_html=True)
+
         show_df = group_df[[
             "Источник", "Цена", "Остаток", "Разница к нам, руб", "Разница к нам, %", "Статус", "Артикул источника", "Название источника"
         ]].copy()
-        for col in ["Цена", "Остаток", "Разница к нам, руб", "Разница к нам, %"]:
-            if col not in show_df.columns:
-                continue
         show_df["Цена"] = show_df["Цена"].apply(lambda v: fmt_price(v) if pd.notna(v) else "")
         show_df["Остаток"] = show_df["Остаток"].apply(lambda v: fmt_qty(v) if pd.notna(v) else "")
         show_df["Разница к нам, руб"] = show_df["Разница к нам, руб"].apply(lambda v: fmt_price(v) if pd.notna(v) else "")
         show_df["Разница к нам, %"] = show_df["Разница к нам, %"].apply(lambda v: (str(round(float(v), 2)).replace(".0", "") + "%") if pd.notna(v) else "")
-        st.dataframe(show_df, use_container_width=True, hide_index=True, height=min(260, 70 + len(show_df) * 36))
+        with st.expander(f"Таблица по {article}"):
+            st.dataframe(show_df, use_container_width=True, hide_index=True, height=min(260, 70 + len(show_df) * 36))
 
     st.download_button(
         "⬇️ Скачать все цены в Excel",
@@ -2151,7 +2262,6 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
         file_name="moy_tovar_all_distributor_prices.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
-
 
 def build_full_distributor_report(df: pd.DataFrame, threshold_percent: float, search_mode: str, min_qty: float = 1.0) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
@@ -2595,6 +2705,40 @@ st.markdown(
     [data-testid="stDataFrame"] { border: 1px solid #dbe5f1; border-radius: 18px; overflow: hidden; box-shadow: 0 6px 18px rgba(15,23,42,.05); }
     [data-testid="stForm"] { background: linear-gradient(180deg, rgba(255,255,255,.35), rgba(255,255,255,.1)); border-radius: 18px; }
     .mini-chip { display:inline-flex; align-items:center; gap:6px; padding:7px 11px; border-radius:999px; background:#eef4ff; color:#315efb; font-weight:800; font-size:12px; margin-right:6px; margin-bottom:6px; border: 1px solid #d6e3ff; }
+    .soft-note { margin: 8px 0 12px 0; padding: 11px 14px; border-radius: 16px; background: linear-gradient(180deg, #f7fbff 0%, #eef5ff 100%); border: 1px solid #d6e4ff; color: #44607f; font-size: 13px; line-height: 1.55; }
+    .result-inline-stat { display:inline-flex; align-items:center; gap:8px; margin: 2px 0 14px 0; padding: 9px 13px; border-radius: 999px; background:#eefaf1; color:#166534; border:1px solid #cbead4; font-weight:800; }
+    .insight-grid { display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0 16px 0; }
+    .insight-card { background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%); border: 1px solid #dbe7fb; border-radius: 20px; padding: 14px 15px; box-shadow: 0 8px 18px rgba(15,23,42,.05); }
+    .insight-top { display:flex; align-items:center; gap:8px; margin-bottom: 10px; }
+    .insight-icon { width:32px; height:32px; display:flex; align-items:center; justify-content:center; border-radius: 12px; background:#eef4ff; font-size:16px; }
+    .insight-label { color:#64748b; font-size:12px; font-weight:800; }
+    .insight-value { color:#0f172a; font-size: 28px; font-weight: 900; line-height:1.1; margin-bottom: 6px; }
+    .insight-note { color:#6b7c93; font-size:12px; line-height:1.45; }
+    .all-prices-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin: 14px 0 10px 0; padding: 14px 16px; border-radius: 18px; background: linear-gradient(180deg, #fbfdff 0%, #f5f9ff 100%); border:1px solid #dbe7fb; }
+    .all-prices-article { color:#315efb; font-size: 18px; font-weight: 900; margin-bottom: 4px; }
+    .all-prices-name { color:#0f172a; font-size: 14px; font-weight: 800; line-height: 1.45; }
+    .all-prices-own { margin-top: 6px; color:#64748b; font-size: 12.5px; }
+    .offers-grid { display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0 0 14px 0; }
+    .offer-card { border-radius: 18px; padding: 14px; border:1px solid #dbe7fb; background: linear-gradient(180deg, #ffffff 0%, #f9fbff 100%); box-shadow: 0 8px 18px rgba(15,23,42,.05); min-height: 172px; }
+    .offer-card-top { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom: 10px; }
+    .offer-source { color:#0f172a; font-size: 15px; font-weight: 900; }
+    .offer-status { display:inline-flex; align-items:center; justify-content:center; padding:5px 9px; border-radius:999px; font-size:11px; font-weight:900; }
+    .offer-good .offer-status { background:#e9f9ef; color:#15803d; }
+    .offer-bad .offer-status { background:#fff1f2; color:#be123c; }
+    .offer-neutral .offer-status { background:#eef4ff; color:#315efb; }
+    .offer-own .offer-status { background:#f3f4f6; color:#475569; }
+    .offer-muted .offer-status { background:#f8fafc; color:#64748b; }
+    .offer-price { color:#0f2f83; font-size: 24px; font-weight: 900; line-height: 1.15; margin-bottom: 6px; }
+    .offer-meta { color:#64748b; font-size: 12.5px; line-height:1.45; margin-bottom: 4px; }
+    .offer-code { color:#315efb; font-size:12px; font-weight:800; margin-top: 8px; }
+    .offer-name { color:#334155; font-size:12px; line-height:1.45; margin-top:4px; }
+    @media (max-width: 1100px) {
+        .insight-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .offers-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 700px) {
+        .insight-grid, .offers-grid { grid-template-columns: 1fr; }
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -2834,6 +2978,7 @@ else:
     m4.metric("Каталог", len(current_df))
 
     compare_map = distributor_compare_map(result_df, search_mode, min_qty=min_dist_qty) if distributor_sources_ready() else {}
+    render_results_insight_dashboard(result_df, compare_map)
     if compare_map:
         better_rows = sum(1 for item in compare_map.values() if item.get("best_offer"))
         chips = []
