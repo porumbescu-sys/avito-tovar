@@ -314,7 +314,15 @@ init_state()
 def normalize_text(value: object) -> str:
     if value is None:
         return ""
-    return re.sub(r"\s+", " ", str(value).strip())
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = re.sub(r"\s+", " ", str(value).strip())
+    if text.lower() in {"nan", "nat", "none"}:
+        return ""
+    return text
 
 
 def normalize_article(value: object) -> str:
@@ -329,7 +337,15 @@ def contains_text(value: object) -> str:
 def compact_text(value: object) -> str:
     if value is None:
         return ""
-    return re.sub(r"\s+", "", str(value).strip()).upper()
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip()
+    if text.lower() in {"nan", "nat", "none"}:
+        return ""
+    return re.sub(r"\s+", "", text).upper()
 
 
 def canonical_brand_key(value: object) -> str:
@@ -338,6 +354,42 @@ def canonical_brand_key(value: object) -> str:
         return ""
     key = re.sub(r"[^A-ZА-Я0-9]", "", raw)
     return RESOURCE_BRAND_KEY_ALIASES.get(key, key)
+
+
+CATALOG_BRAND_PATTERNS: list[tuple[str, str]] = [
+    ("KONICA-MINOLTA", "Konica-Minolta"),
+    ("KONICA MINOLTA", "Konica-Minolta"),
+    ("КАТЮША", "Катюша"),
+    ("KYOCERA", "Kyocera"),
+    ("LEXMARK", "Lexmark"),
+    ("PANASONIC", "Panasonic"),
+    ("BROTHER", "Brother"),
+    ("CANON", "Canon"),
+    ("EPSON", "Epson"),
+    ("PANTUM", "Pantum"),
+    ("XEROX", "Xerox"),
+    ("SAMSUNG", "Samsung"),
+    ("SHARP", "Sharp"),
+    ("AVISION", "Avision"),
+    ("RICOH", "Ricoh"),
+    ("OKI", "OKI"),
+    ("HP", "HP"),
+]
+
+def infer_brand_from_name(name: object) -> str:
+    text = contains_text(name)
+    if not text:
+        return ""
+    for needle, label in CATALOG_BRAND_PATTERNS:
+        if needle in text:
+            return label
+    return ""
+
+def normalize_or_infer_brand(raw_brand: object, name: object = "") -> str:
+    brand = normalize_text(raw_brand)
+    if brand:
+        return brand
+    return infer_brand_from_name(name)
 
 
 def first_existing_series(df: pd.DataFrame, candidates: list[str], default: object = "") -> pd.Series:
@@ -579,7 +631,7 @@ def load_price_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     data["article"] = raw[mapping["article"]].map(normalize_text)
     data["article_norm"] = raw[mapping["article"]].map(normalize_article)
     data["name"] = raw[mapping["name"]].map(normalize_text)
-    data["brand"] = raw[mapping["brand"]].map(normalize_text) if mapping.get("brand") else ""
+    data["brand"] = raw.apply(lambda r: normalize_or_infer_brand(r[mapping["brand"]], r[mapping["name"]]) if mapping.get("brand") else infer_brand_from_name(r[mapping["name"]]), axis=1)
     data["free_qty"] = (
         pd.to_numeric(raw[mapping["free_qty"]], errors="coerce").fillna(0)
         if mapping.get("free_qty")
