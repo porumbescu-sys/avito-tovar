@@ -264,8 +264,6 @@ def pantum_safe_p_alias_match(token_norm: str, row: pd.Series, own_brand: object
 def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, Any], token_norm: str, own_codes: Optional[list[str]] = None) -> bool:
     if not bool(row.get("is_good_offer", True)):
         return False
-    if not family_compatible(choice, row):
-        return False
 
     own_brand = choice.get("brand", "")
     code_pool = set(unique_norm_codes((own_codes or []) + row_catalog_compare_codes(choice, token_norm)))
@@ -275,6 +273,7 @@ def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, An
     row_article_norm = normalize_article(row.get("article", ""))
     row_alt_norm = normalize_article(row.get("alt_article", ""))
 
+    # Сильные совпадения по коду не должны отрезаться эвристикой по типу товара.
     if row_article_norm in code_pool:
         return True
     if row_alt_norm in code_pool:
@@ -282,6 +281,10 @@ def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, An
     for code in code_pool:
         if pantum_safe_p_alias_match(code, row, own_brand=own_brand):
             return True
+
+    # Более слабые совпадения через название/alias-коды проверяем уже строже.
+    if not family_compatible(choice, row):
+        return False
     return False
 
 
