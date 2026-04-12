@@ -248,23 +248,27 @@ def pantum_safe_p_alias_match(token_norm: str, row: pd.Series, own_brand: object
     return False
 
 
-def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, Any], token_norm: str) -> bool:
+def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, Any], token_norm: str, own_codes: Optional[list[str]] = None) -> bool:
     if not bool(row.get("is_good_offer", True)):
         return False
     if not family_compatible(choice, row):
         return False
 
-    own_article_norm = normalize_article(choice.get("article", ""))
     own_brand = choice.get("brand", "")
+    code_pool = set(unique_norm_codes((own_codes or []) + row_catalog_compare_codes(choice, token_norm)))
+    if not code_pool:
+        return False
+
     row_article_norm = normalize_article(row.get("article", ""))
     row_alt_norm = normalize_article(row.get("alt_article", ""))
 
-    if row_article_norm == token_norm or row_article_norm == own_article_norm:
+    if row_article_norm in code_pool:
         return True
-    if row_alt_norm == token_norm or row_alt_norm == own_article_norm:
-        return is_confident_alt_exact_match(row, token_norm or own_article_norm)
-    if pantum_safe_p_alias_match(token_norm or own_article_norm, row, own_brand=own_brand):
-        return True
+    if row_alt_norm in code_pool:
+        return is_confident_alt_exact_match(row, row_alt_norm)
+    for code in code_pool:
+        if pantum_safe_p_alias_match(code, row, own_brand=own_brand):
+            return True
     return False
 
 
@@ -439,6 +443,41 @@ def extract_article_candidates_from_text(text: object) -> list[str]:
     return out
 
 
+
+
+def unique_norm_codes(items: list[object]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        norm = normalize_article(item)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+    return out
+
+
+def build_catalog_code_list(article: object, name: object) -> list[str]:
+    return unique_norm_codes([article, *extract_article_candidates_from_text(name)])
+
+
+def row_catalog_search_codes(row: pd.Series | dict[str, Any]) -> list[str]:
+    existing = row.get("all_code_list", []) or []
+    if isinstance(existing, list) and existing:
+        return unique_norm_codes(existing)
+    return build_catalog_code_list(row.get("article", ""), row.get("name", ""))
+
+
+def row_catalog_compare_codes(row: pd.Series | dict[str, Any], token: str = "") -> list[str]:
+    article = row.get("article", "")
+    name = row.get("name", "")
+    brand = row.get("brand", "")
+    token_norm = normalize_article(token)
+    if is_negative_substitute_text(article, name, brand):
+        return unique_norm_codes([article, token_norm])
+    return unique_norm_codes([token_norm, *row_catalog_search_codes(row)])
+
+
 def row_has_negative_series_markers(row: pd.Series) -> bool:
     text = f"{row.get('article', '')} {row.get('name', '')}".upper()
     return any(marker in text for marker in NEGATIVE_SERIES_MARKERS)
@@ -561,6 +600,7 @@ def load_price_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     data["price_20"] = data["sale_price"] * (1 - DEFAULT_DISCOUNT_2 / 100)
     data["name_tokens"] = data["name"].map(tokenize_text)
     data["name_code_list"] = data["name"].map(extract_article_candidates_from_text)
+    data["all_code_list"] = data.apply(lambda row: build_catalog_code_list(row["article"], row["name"]), axis=1)
     data["search_blob"] = (
         data["article_norm"].fillna("")
         + " "
@@ -815,7 +855,7 @@ def apply_price_updates(df: pd.DataFrame, updates_text: str) -> tuple[pd.DataFra
         mask = out["article_norm"] == article_norm
         match_source = "exact"
         if not mask.any():
-            linked = out[out["name_tokens"].map(lambda toks: article_norm in toks)]
+            linked = out[out["all_code_list"].apply(lambda codes: article_norm in codes if isinstance(codes, list) else False)]
             if not linked.empty:
                 safe_linked = linked[~linked.apply(is_negative_substitute_row, axis=1)]
                 if not safe_linked.empty:
@@ -850,13 +890,11 @@ def find_best_row_for_token(df: pd.DataFrame, token: str, search_mode: str) -> t
         exact_safe = exact[~exact.apply(is_negative_substitute_row, axis=1)]
         chosen = exact_safe.iloc[0] if not exact_safe.empty else exact.iloc[0]
         return chosen, "exact"
-    name_matches = df[df["name_tokens"].map(lambda toks: article_norm in toks)]
-    if not name_matches.empty:
-        safe_name_matches = name_matches[~name_matches.apply(is_negative_substitute_row, axis=1)]
-        if not safe_name_matches.empty:
-            chosen = safe_name_matches.iloc[0]
-            return chosen, "linked"
-        return None, ""
+    alias_matches = df[df["all_code_list"].apply(lambda codes: article_norm in codes if isinstance(codes, list) else False)]
+    if not alias_matches.empty:
+        safe_alias_matches = alias_matches[~alias_matches.apply(is_negative_substitute_row, axis=1)]
+        chosen = safe_alias_matches.iloc[0] if not safe_alias_matches.empty else alias_matches.iloc[0]
+        return chosen, "linked"
     if search_mode in {"Умный", "Артикул + название + бренд"}:
         contains = df[df["search_blob"].str.contains(re.escape(token.upper()), na=False)]
         if not contains.empty:
@@ -1325,7 +1363,7 @@ def family_compatible(own_row: dict[str, Any], dist_row: pd.Series) -> bool:
 
 
 
-def resource_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str) -> pd.DataFrame:
+def resource_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str, own_codes: Optional[list[str]] = None) -> pd.DataFrame:
     if df is None or df.empty:
         return df.iloc[0:0].copy()
 
@@ -1338,30 +1376,30 @@ def resource_search_candidates(df: pd.DataFrame, token_norm: str, own_article_no
     if working.empty:
         return working
 
-    primary_exact = working[working["article_norm"] == token_norm].copy()
+    search_codes = unique_norm_codes([token_norm, own_article_norm, *(own_codes or [])])
+    if not search_codes:
+        return working.iloc[0:0].copy()
+
+    primary_exact = working[working["article_norm"].isin(search_codes)].copy()
     if not primary_exact.empty:
         primary_exact["_match_rank"] = 0
         return primary_exact
 
-    alt_exact = working[working["alt_article_norm"] == token_norm].copy()
+    alt_exact = working[working["alt_article_norm"].isin(search_codes)].copy()
     if not alt_exact.empty:
-        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, token_norm), axis=1)].copy()
+        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, next((c for c in search_codes if normalize_article(r.get("alt_article", "")) == c), token_norm or own_article_norm)), axis=1)].copy()
         if not alt_exact.empty:
             alt_exact["_match_rank"] = 1
             return alt_exact
 
-    pantum_p = working[working.apply(lambda r: pantum_safe_p_alias_match(token_norm or own_article_norm, r), axis=1)].copy()
+    pantum_p = working[working.apply(lambda r: any(pantum_safe_p_alias_match(code, r) for code in search_codes), axis=1)].copy()
     if not pantum_p.empty:
-        pantum_p = pantum_p[(pantum_p["article_norm"] != token_norm) & (pantum_p["alt_article_norm"] != token_norm)].copy()
+        pantum_p = pantum_p[~pantum_p["article_norm"].isin(search_codes) & ~pantum_p["alt_article_norm"].isin(search_codes)].copy()
         if not pantum_p.empty:
             pantum_p["_match_rank"] = 2
             return pantum_p
 
-    name_code = working[
-        working["name_code_list"].apply(
-            lambda codes: (token_norm in codes) or (own_article_norm in codes) if isinstance(codes, list) else False
-        )
-    ].copy()
+    name_code = working[working["name_code_list"].apply(lambda codes: any(code in codes for code in search_codes) if isinstance(codes, list) else False)].copy()
     if not name_code.empty:
         name_code = name_code[name_code.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
         if not name_code.empty:
@@ -1371,7 +1409,7 @@ def resource_search_candidates(df: pd.DataFrame, token_norm: str, own_article_no
     return working.iloc[0:0].copy()
 
 
-def ocs_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str) -> pd.DataFrame:
+def ocs_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str, own_codes: Optional[list[str]] = None) -> pd.DataFrame:
     if df is None or df.empty:
         return df.iloc[0:0].copy()
 
@@ -1384,30 +1422,30 @@ def ocs_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: s
     if working.empty:
         return working
 
-    primary_exact = working[working["article_norm"] == token_norm].copy()
+    search_codes = unique_norm_codes([token_norm, own_article_norm, *(own_codes or [])])
+    if not search_codes:
+        return working.iloc[0:0].copy()
+
+    primary_exact = working[working["article_norm"].isin(search_codes)].copy()
     if not primary_exact.empty:
         primary_exact["_match_rank"] = 0
         return primary_exact
 
-    alt_exact = working[working["alt_article_norm"] == token_norm].copy()
+    alt_exact = working[working["alt_article_norm"].isin(search_codes)].copy()
     if not alt_exact.empty:
-        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, token_norm), axis=1)].copy()
+        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, next((c for c in search_codes if normalize_article(r.get("alt_article", "")) == c), token_norm or own_article_norm)), axis=1)].copy()
         if not alt_exact.empty:
             alt_exact["_match_rank"] = 1
             return alt_exact
 
-    pantum_p = working[working.apply(lambda r: pantum_safe_p_alias_match(token_norm or own_article_norm, r), axis=1)].copy()
+    pantum_p = working[working.apply(lambda r: any(pantum_safe_p_alias_match(code, r) for code in search_codes), axis=1)].copy()
     if not pantum_p.empty:
-        pantum_p = pantum_p[(pantum_p["article_norm"] != token_norm) & (pantum_p["alt_article_norm"] != token_norm)].copy()
+        pantum_p = pantum_p[~pantum_p["article_norm"].isin(search_codes) & ~pantum_p["alt_article_norm"].isin(search_codes)].copy()
         if not pantum_p.empty:
             pantum_p["_match_rank"] = 2
             return pantum_p
 
-    name_code = working[
-        working["name_code_list"].apply(
-            lambda codes: (token_norm in codes) or (own_article_norm in codes) if isinstance(codes, list) else False
-        )
-    ].copy()
+    name_code = working[working["name_code_list"].apply(lambda codes: any(code in codes for code in search_codes) if isinstance(codes, list) else False)].copy()
     if not name_code.empty:
         name_code = name_code[name_code.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
         if not name_code.empty:
@@ -1417,7 +1455,7 @@ def ocs_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: s
     return working.iloc[0:0].copy()
 
 
-def merlion_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str) -> pd.DataFrame:
+def merlion_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str, own_codes: Optional[list[str]] = None) -> pd.DataFrame:
     if df is None or df.empty:
         return df.iloc[0:0].copy()
 
@@ -1430,26 +1468,30 @@ def merlion_search_candidates(df: pd.DataFrame, token_norm: str, own_article_nor
     if working.empty:
         return working
 
-    alt_exact = working[working["alt_article_norm"] == token_norm].copy()
+    search_codes = unique_norm_codes([token_norm, own_article_norm, *(own_codes or [])])
+    if not search_codes:
+        return working.iloc[0:0].copy()
+
+    alt_exact = working[working["alt_article_norm"].isin(search_codes)].copy()
     if not alt_exact.empty:
-        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, token_norm), axis=1)].copy()
+        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, next((c for c in search_codes if normalize_article(r.get("alt_article", "")) == c), token_norm or own_article_norm)), axis=1)].copy()
         if not alt_exact.empty:
             alt_exact["_match_rank"] = 0
             return alt_exact
 
-    primary_exact = working[working["article_norm"] == token_norm].copy()
+    primary_exact = working[working["article_norm"].isin(search_codes)].copy()
     if not primary_exact.empty:
         primary_exact["_match_rank"] = 1
         return primary_exact
 
-    pantum_p = working[working.apply(lambda r: pantum_safe_p_alias_match(token_norm or own_article_norm, r), axis=1)].copy()
+    pantum_p = working[working.apply(lambda r: any(pantum_safe_p_alias_match(code, r) for code in search_codes), axis=1)].copy()
     if not pantum_p.empty:
-        pantum_p = pantum_p[(pantum_p["article_norm"] != token_norm) & (pantum_p["alt_article_norm"] != token_norm)].copy()
+        pantum_p = pantum_p[~pantum_p["article_norm"].isin(search_codes) & ~pantum_p["alt_article_norm"].isin(search_codes)].copy()
         if not pantum_p.empty:
             pantum_p["_match_rank"] = 2
             return pantum_p
 
-    linked = working[working["name_code_list"].apply(lambda codes: token_norm in codes or own_article_norm in codes if isinstance(codes, list) else False)].copy()
+    linked = working[working["name_code_list"].apply(lambda codes: any(code in codes for code in search_codes) if isinstance(codes, list) else False)].copy()
     if not linked.empty:
         linked = linked[linked.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
         if not linked.empty:
@@ -1459,7 +1501,7 @@ def merlion_search_candidates(df: pd.DataFrame, token_norm: str, own_article_nor
     return working.iloc[0:0].copy()
 
 
-def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str) -> pd.DataFrame:
+def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str, own_codes: Optional[list[str]] = None) -> pd.DataFrame:
     if df is None or df.empty:
         return df.iloc[0:0].copy()
 
@@ -1469,11 +1511,11 @@ def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article
     except Exception:
         distributor_name = ""
     if distributor_name == "Ресурс":
-        return resource_search_candidates(df, token_norm, own_article_norm, search_mode)
+        return resource_search_candidates(df, token_norm, own_article_norm, search_mode, own_codes=own_codes)
     if distributor_name == "OCS":
-        return ocs_search_candidates(df, token_norm, own_article_norm, search_mode)
+        return ocs_search_candidates(df, token_norm, own_article_norm, search_mode, own_codes=own_codes)
     if distributor_name == "Мерлион":
-        return merlion_search_candidates(df, token_norm, own_article_norm, search_mode)
+        return merlion_search_candidates(df, token_norm, own_article_norm, search_mode, own_codes=own_codes)
 
     working = df.copy()
     if "is_good_offer" in working.columns:
@@ -1481,24 +1523,26 @@ def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article
     if working.empty:
         return working
 
-    primary_exact = working[working["article_norm"] == token_norm].copy()
+    search_codes = unique_norm_codes([token_norm, own_article_norm, *(own_codes or [])])
+    if not search_codes:
+        return working.iloc[0:0].copy()
+
+    primary_exact = working[working["article_norm"].isin(search_codes)].copy()
     if not primary_exact.empty:
         primary_exact["_match_rank"] = 0
         return primary_exact
 
-    alt_exact = working[working["alt_article_norm"] == token_norm].copy()
+    alt_exact = working[working["alt_article_norm"].isin(search_codes)].copy()
     if not alt_exact.empty:
-        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, token_norm), axis=1)].copy()
+        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, next((c for c in search_codes if normalize_article(r.get("alt_article", "")) == c), token_norm or own_article_norm)), axis=1)].copy()
         if not alt_exact.empty:
             alt_exact["_match_rank"] = 1
             return alt_exact
 
-    # Для сравнения прайсов работаем максимально строго:
-    # для артикулов не проваливаемся в contains/по названию.
-    if looks_like_article_token(token_norm) or looks_like_article_token(own_article_norm):
+    if any(looks_like_article_token(code) for code in search_codes):
         return working.iloc[0:0].copy()
 
-    linked = working[working["name_code_list"].apply(lambda codes: token_norm in codes or own_article_norm in codes if isinstance(codes, list) else False)].copy()
+    linked = working[working["name_code_list"].apply(lambda codes: any(code in codes for code in search_codes) if isinstance(codes, list) else False)].copy()
     if not linked.empty:
         linked = linked[linked.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
         if not linked.empty:
@@ -1525,8 +1569,9 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
     own_article_norm = normalize_article(choice.get("article", ""))
     token_norm = normalize_article(token)
     own_is_original = not is_negative_substitute_text(choice.get("article", ""), choice.get("name", ""), choice.get("brand", ""))
+    own_compare_codes = row_catalog_compare_codes(choice, token)
 
-    cand = distributor_search_candidates(df, token_norm, own_article_norm, search_mode)
+    cand = distributor_search_candidates(df, token_norm, own_article_norm, search_mode, own_codes=own_compare_codes)
     if cand.empty:
         return None
     cand = cand[cand["free_qty"].astype(float) >= float(min_qty)].copy()
@@ -1539,7 +1584,7 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
         if orig.empty:
             return None
         cand = orig
-    cand = cand[cand.apply(lambda r: is_confident_distributor_row_for_choice(r, choice, token_norm), axis=1)].copy()
+    cand = cand[cand.apply(lambda r: is_confident_distributor_row_for_choice(r, choice, token_norm, own_codes=own_compare_codes), axis=1)].copy()
     if cand.empty:
         return None
     if own_brand:
