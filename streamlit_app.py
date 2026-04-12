@@ -202,6 +202,52 @@ def is_confident_alt_exact_match(row: pd.Series, token_norm: str) -> bool:
     return True
 
 
+def _pantum_brand_key(value: object) -> str:
+    return canonical_brand_key(value)
+
+
+def pantum_safe_p_alias_match(token_norm: str, row: pd.Series, own_brand: object = "") -> bool:
+    token_norm = normalize_article(token_norm)
+    if not token_norm:
+        return False
+    row_brand_key = _pantum_brand_key(row.get("brand", ""))
+    own_brand_key = _pantum_brand_key(own_brand)
+    if row_brand_key != "PANTUM" and own_brand_key != "PANTUM":
+        return False
+    if not bool(row.get("is_good_offer", True)) or not bool(row.get("is_original", True)):
+        return False
+    if has_suspect_vendor_article_prefix(row.get("article", "")) or has_suspect_vendor_article_prefix(row.get("alt_article", "")):
+        return False
+    if text_has_any_marker(
+        " ".join([
+            str(row.get("article", "")),
+            str(row.get("alt_article", "")),
+            str(row.get("name", "")),
+            str(row.get("brand", "")),
+        ]),
+        SUBSTITUTE_NEGATIVE_MARKERS,
+    ):
+        return False
+    if confident_dist_code_count(row) > 4:
+        return False
+
+    candidate_codes = [normalize_article(row.get("article", "")), normalize_article(row.get("alt_article", ""))]
+    candidate_codes = [code for code in candidate_codes if code]
+    if not candidate_codes:
+        return False
+
+    safe_pairs = {token_norm}
+    if token_norm.endswith("P") and len(token_norm) > 4:
+        safe_pairs.add(token_norm[:-1])
+    else:
+        safe_pairs.add(token_norm + "P")
+
+    for code in candidate_codes:
+        if code in safe_pairs:
+            return True
+    return False
+
+
 def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, Any], token_norm: str) -> bool:
     if not bool(row.get("is_good_offer", True)):
         return False
@@ -209,6 +255,7 @@ def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, An
         return False
 
     own_article_norm = normalize_article(choice.get("article", ""))
+    own_brand = choice.get("brand", "")
     row_article_norm = normalize_article(row.get("article", ""))
     row_alt_norm = normalize_article(row.get("alt_article", ""))
 
@@ -216,6 +263,8 @@ def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, An
         return True
     if row_alt_norm == token_norm or row_alt_norm == own_article_norm:
         return is_confident_alt_exact_match(row, token_norm or own_article_norm)
+    if pantum_safe_p_alias_match(token_norm or own_article_norm, row, own_brand=own_brand):
+        return True
     return False
 
 
@@ -1301,6 +1350,13 @@ def resource_search_candidates(df: pd.DataFrame, token_norm: str, own_article_no
             alt_exact["_match_rank"] = 1
             return alt_exact
 
+    pantum_p = working[working.apply(lambda r: pantum_safe_p_alias_match(token_norm or own_article_norm, r), axis=1)].copy()
+    if not pantum_p.empty:
+        pantum_p = pantum_p[(pantum_p["article_norm"] != token_norm) & (pantum_p["alt_article_norm"] != token_norm)].copy()
+        if not pantum_p.empty:
+            pantum_p["_match_rank"] = 2
+            return pantum_p
+
     name_code = working[
         working["name_code_list"].apply(
             lambda codes: (token_norm in codes) or (own_article_norm in codes) if isinstance(codes, list) else False
@@ -1309,7 +1365,7 @@ def resource_search_candidates(df: pd.DataFrame, token_norm: str, own_article_no
     if not name_code.empty:
         name_code = name_code[name_code.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
         if not name_code.empty:
-            name_code["_match_rank"] = 2
+            name_code["_match_rank"] = 3
             return name_code
 
     return working.iloc[0:0].copy()
@@ -1340,6 +1396,13 @@ def ocs_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: s
             alt_exact["_match_rank"] = 1
             return alt_exact
 
+    pantum_p = working[working.apply(lambda r: pantum_safe_p_alias_match(token_norm or own_article_norm, r), axis=1)].copy()
+    if not pantum_p.empty:
+        pantum_p = pantum_p[(pantum_p["article_norm"] != token_norm) & (pantum_p["alt_article_norm"] != token_norm)].copy()
+        if not pantum_p.empty:
+            pantum_p["_match_rank"] = 2
+            return pantum_p
+
     name_code = working[
         working["name_code_list"].apply(
             lambda codes: (token_norm in codes) or (own_article_norm in codes) if isinstance(codes, list) else False
@@ -1348,7 +1411,7 @@ def ocs_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: s
     if not name_code.empty:
         name_code = name_code[name_code.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
         if not name_code.empty:
-            name_code["_match_rank"] = 2
+            name_code["_match_rank"] = 3
             return name_code
 
     return working.iloc[0:0].copy()
@@ -1379,11 +1442,18 @@ def merlion_search_candidates(df: pd.DataFrame, token_norm: str, own_article_nor
         primary_exact["_match_rank"] = 1
         return primary_exact
 
+    pantum_p = working[working.apply(lambda r: pantum_safe_p_alias_match(token_norm or own_article_norm, r), axis=1)].copy()
+    if not pantum_p.empty:
+        pantum_p = pantum_p[(pantum_p["article_norm"] != token_norm) & (pantum_p["alt_article_norm"] != token_norm)].copy()
+        if not pantum_p.empty:
+            pantum_p["_match_rank"] = 2
+            return pantum_p
+
     linked = working[working["name_code_list"].apply(lambda codes: token_norm in codes or own_article_norm in codes if isinstance(codes, list) else False)].copy()
     if not linked.empty:
         linked = linked[linked.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
         if not linked.empty:
-            linked["_match_rank"] = 2
+            linked["_match_rank"] = 3
             return linked
 
     return working.iloc[0:0].copy()
