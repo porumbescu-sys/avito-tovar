@@ -1414,7 +1414,7 @@ def load_resource_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     data["article"] = df.get("Артикул", "").map(normalize_text)
     data["alt_article"] = df.get("Артикул производителя", "").map(normalize_text)
     data["name"] = df.get("Номенклатура", "").map(normalize_text)
-    data["brand"] = df.get("Производитель", "").map(normalize_text)
+    data["brand"] = pd.Series(df.get("Производитель", ""), index=df.index).combine(df.get("Номенклатура", ""), lambda b, n: normalize_or_infer_brand(b, n))
     data["product_type"] = df.get("Тип продукции", "").map(normalize_text) if "Тип продукции" in df.columns else ""
     data["price"] = pd.to_numeric(df.get("Цена, руб", 0), errors="coerce")
     data["free_qty"] = df.get("Доступно Москва", 0).map(parse_resource_qty)
@@ -1443,7 +1443,7 @@ def load_ocs_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     data["article"] = df.get("Каталожный номер", "").map(normalize_text)
     data["alt_article"] = df.get("Номенклатурный номер", "").map(normalize_text) if "Номенклатурный номер" in df.columns else ""
     data["name"] = df.get("Наименование", "").map(normalize_text)
-    data["brand"] = df.get("Производитель", "").map(normalize_text)
+    data["brand"] = pd.Series(df.get("Производитель", ""), index=df.index).combine(df.get("Наименование", ""), lambda b, n: normalize_or_infer_brand(b, n))
     data["product_type"] = df.get("Категория оборудования", "").map(normalize_text) if "Категория оборудования" in df.columns else ""
     data["price"] = pd.to_numeric(df.get("Цена", 0), errors="coerce")
     data["free_qty"] = df.get("Доступно для резерва", 0).map(parse_ocs_qty)
@@ -1472,7 +1472,7 @@ def load_merlion_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     data["article"] = first_existing_series(df, ["Код производителя"], "").map(normalize_text)
     data["alt_article"] = first_existing_series(df, ["Доп. Номер"], "").map(normalize_text)
     data["name"] = first_existing_series(df, ["Наименование"], "").map(normalize_text)
-    data["brand"] = first_existing_series(df, ["Бренд", "Производитель"], "").map(normalize_text)
+    data["brand"] = first_existing_series(df, ["Бренд", "Производитель"], "").combine(first_existing_series(df, ["Наименование"], ""), lambda b, n: normalize_or_infer_brand(b, n))
     data["group_root"] = first_existing_series(df, ["Группа 1", "Группа1", "Товарная группа", "Группа"], "").map(normalize_text)
     data["group_level2"] = first_existing_series(df, ["Группа 2", "Группа2", "Подгруппа", "Категория"], "").map(normalize_text)
     data["product_type"] = first_existing_series(df, ["Группа 3", "Группа3", "Вид товара", "Подкатегория"], "").map(normalize_text)
