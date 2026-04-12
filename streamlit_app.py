@@ -1088,18 +1088,19 @@ def apply_price_updates(df: pd.DataFrame, updates_text: str) -> tuple[pd.DataFra
 
 def find_best_row_for_token(df: pd.DataFrame, token: str, search_mode: str) -> tuple[Optional[pd.Series], str]:
     article_norm = normalize_article(token)
-    if not article_norm:
+    if article_norm:
+        exact = df[df["article_norm"] == article_norm]
+        if not exact.empty:
+            exact_safe = exact[~exact.apply(is_negative_substitute_row, axis=1)]
+            chosen = exact_safe.iloc[0] if not exact_safe.empty else exact.iloc[0]
+            return chosen, "exact"
+        alias_matches = df[df["all_code_list"].apply(lambda codes: article_norm in codes if isinstance(codes, list) else False)]
+        if not alias_matches.empty:
+            safe_alias_matches = alias_matches[~alias_matches.apply(is_negative_substitute_row, axis=1)]
+            chosen = safe_alias_matches.iloc[0] if not safe_alias_matches.empty else alias_matches.iloc[0]
+            return chosen, "linked"
         return None, ""
-    exact = df[df["article_norm"] == article_norm]
-    if not exact.empty:
-        exact_safe = exact[~exact.apply(is_negative_substitute_row, axis=1)]
-        chosen = exact_safe.iloc[0] if not exact_safe.empty else exact.iloc[0]
-        return chosen, "exact"
-    alias_matches = df[df["all_code_list"].apply(lambda codes: article_norm in codes if isinstance(codes, list) else False)]
-    if not alias_matches.empty:
-        safe_alias_matches = alias_matches[~alias_matches.apply(is_negative_substitute_row, axis=1)]
-        chosen = safe_alias_matches.iloc[0] if not safe_alias_matches.empty else alias_matches.iloc[0]
-        return chosen, "linked"
+
     if search_mode in {"Умный", "Артикул + название + бренд"}:
         contains = df[df["search_blob"].str.contains(re.escape(token.upper()), na=False)]
         if not contains.empty:
@@ -1107,7 +1108,6 @@ def find_best_row_for_token(df: pd.DataFrame, token: str, search_mode: str) -> t
             if not safe_contains.empty:
                 chosen = safe_contains.iloc[0]
                 return chosen, "similar"
-            return None, ""
     return None, ""
 
 
@@ -1602,6 +1602,35 @@ def family_compatible(own_row: dict[str, Any], dist_row: pd.Series) -> bool:
         return False
     return own_family == dist_family
 
+
+
+def _mark_match_rank(df: pd.DataFrame, rank: int, kind: str) -> pd.DataFrame:
+    out = df.copy()
+    out["_match_rank"] = rank
+    out["_direct_match_kind"] = kind
+    return out
+
+
+def _resource_exact_candidates(working: pd.DataFrame, search_codes: list[str]) -> pd.DataFrame:
+    primary_exact = working[working["article_norm"].isin(search_codes)].copy()
+    if not primary_exact.empty:
+        return _mark_match_rank(primary_exact, 0, "article")
+
+    alt_exact = working[working["alt_article_norm"].isin(search_codes)].copy()
+    if not alt_exact.empty:
+        return _mark_match_rank(alt_exact, 1, "alt_article")
+
+    pantum_p = working[working.apply(lambda r: any(pantum_safe_p_alias_match(code, r) for code in search_codes), axis=1)].copy()
+    if not pantum_p.empty:
+        pantum_p = pantum_p[~pantum_p["article_norm"].isin(search_codes) & ~pantum_p["alt_article_norm"].isin(search_codes)].copy()
+        if not pantum_p.empty:
+            return _mark_match_rank(pantum_p, 2, "pantum_alias")
+
+    name_code = working[working["name_code_list"].apply(lambda codes: any(code in codes for code in search_codes) if isinstance(codes, list) else False)].copy()
+    if not name_code.empty:
+        return _mark_match_rank(name_code, 3, "name_code")
+
+    return working.iloc[0:0].copy()
 
 
 def resource_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str, own_codes: Optional[list[str]] = None) -> pd.DataFrame:
