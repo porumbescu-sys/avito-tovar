@@ -264,6 +264,8 @@ def pantum_safe_p_alias_match(token_norm: str, row: pd.Series, own_brand: object
 def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, Any], token_norm: str, own_codes: Optional[list[str]] = None) -> bool:
     if not bool(row.get("is_good_offer", True)):
         return False
+    if not family_compatible(choice, row):
+        return False
 
     own_brand = choice.get("brand", "")
     code_pool = set(unique_norm_codes((own_codes or []) + row_catalog_compare_codes(choice, token_norm)))
@@ -273,9 +275,6 @@ def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, An
     row_article_norm = normalize_article(row.get("article", ""))
     row_alt_norm = normalize_article(row.get("alt_article", ""))
 
-    # Главный принцип: если есть прямое совпадение по коду, не режем его типовой эвристикой.
-    # Сначала ищем по артикулу / alt-артикулу / безопасному Pantum-алиасу, и только потом
-    # для более слабых сценариев проверяем совместимость семейства.
     if row_article_norm in code_pool:
         return True
     if row_alt_norm in code_pool:
@@ -283,14 +282,7 @@ def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, An
     for code in code_pool:
         if pantum_safe_p_alias_match(code, row, own_brand=own_brand):
             return True
-
-    # Для непрямых совпадений по коду оставляем защиту по типу товара.
-    if not family_compatible(choice, row):
-        return False
-
-    # Слабый сценарий: код сидит в наименовании, но не совпал с артикулом/alt.
-    name_codes = set(unique_norm_codes(row.get("name_code_list", []) or []))
-    return bool(code_pool & name_codes)
+    return False
 
 
 def init_state() -> None:
@@ -506,15 +498,6 @@ def is_candidate_article_norm(norm: str) -> bool:
     return len(norm) >= 3 and any(ch.isdigit() for ch in norm) and any(ch.isalpha() for ch in norm)
 
 
-def is_low_signal_name_code(norm: str) -> bool:
-    if not norm:
-        return True
-    # Ёмкость/ресурс вроде 3K, 6K, 15K, 1.5K -> после normalise это 15K.
-    if re.fullmatch(r"\d+[A-ZА-Я]{1,2}", norm):
-        return True
-    return False
-
-
 def extract_article_candidates_from_text(text: object) -> list[str]:
     raw = str(text or "").upper()
     prepared = re.sub(r"[|/\\,;:()\[\]{}]+", " ", raw)
@@ -524,7 +507,7 @@ def extract_article_candidates_from_text(text: object) -> list[str]:
     seen: set[str] = set()
     for chunk in chunks:
         norm = normalize_article(chunk)
-        if not is_candidate_article_norm(norm) or is_low_signal_name_code(norm) or norm in seen:
+        if not is_candidate_article_norm(norm) or norm in seen:
             continue
         seen.add(norm)
         out.append(norm)
@@ -1088,19 +1071,18 @@ def apply_price_updates(df: pd.DataFrame, updates_text: str) -> tuple[pd.DataFra
 
 def find_best_row_for_token(df: pd.DataFrame, token: str, search_mode: str) -> tuple[Optional[pd.Series], str]:
     article_norm = normalize_article(token)
-    if article_norm:
-        exact = df[df["article_norm"] == article_norm]
-        if not exact.empty:
-            exact_safe = exact[~exact.apply(is_negative_substitute_row, axis=1)]
-            chosen = exact_safe.iloc[0] if not exact_safe.empty else exact.iloc[0]
-            return chosen, "exact"
-        alias_matches = df[df["all_code_list"].apply(lambda codes: article_norm in codes if isinstance(codes, list) else False)]
-        if not alias_matches.empty:
-            safe_alias_matches = alias_matches[~alias_matches.apply(is_negative_substitute_row, axis=1)]
-            chosen = safe_alias_matches.iloc[0] if not safe_alias_matches.empty else alias_matches.iloc[0]
-            return chosen, "linked"
+    if not article_norm:
         return None, ""
-
+    exact = df[df["article_norm"] == article_norm]
+    if not exact.empty:
+        exact_safe = exact[~exact.apply(is_negative_substitute_row, axis=1)]
+        chosen = exact_safe.iloc[0] if not exact_safe.empty else exact.iloc[0]
+        return chosen, "exact"
+    alias_matches = df[df["all_code_list"].apply(lambda codes: article_norm in codes if isinstance(codes, list) else False)]
+    if not alias_matches.empty:
+        safe_alias_matches = alias_matches[~alias_matches.apply(is_negative_substitute_row, axis=1)]
+        chosen = safe_alias_matches.iloc[0] if not safe_alias_matches.empty else alias_matches.iloc[0]
+        return chosen, "linked"
     if search_mode in {"Умный", "Артикул + название + бренд"}:
         contains = df[df["search_blob"].str.contains(re.escape(token.upper()), na=False)]
         if not contains.empty:
@@ -1108,6 +1090,7 @@ def find_best_row_for_token(df: pd.DataFrame, token: str, search_mode: str) -> t
             if not safe_contains.empty:
                 chosen = safe_contains.iloc[0]
                 return chosen, "similar"
+            return None, ""
     return None, ""
 
 
@@ -1340,10 +1323,6 @@ def collect_quality_flag_text(df: pd.DataFrame) -> pd.Series:
 def parse_resource_qty(value: Any) -> float:
     text = contains_text(value)
     compact = compact_text(value)
-
-    # Ресурс даёт остаток из колонки «Доступно Москва». Там может быть не только число,
-    # но и словесные статусы: Мало / Средне / Среднее / Много / Нет.
-    # Для логики фильтра нам нужно только понять: есть остаток или нет.
     raw = normalize_text(value)
     try:
         parsed = float(str(raw).replace(" ", "").replace(",", "."))
@@ -1551,99 +1530,34 @@ def brand_match(catalog_brand: str, dist_brand: str) -> bool:
     return a in b or b in a
 
 
-def infer_family_from_code(code: object) -> str:
-    norm = normalize_article(code)
-    if not norm:
-        return ""
-    if norm.startswith(("CWT", "WT", "WTB")):
-        return "BOTTLE"
-    if norm.startswith(("DL", "DR", "DO", "CDL", "CDO")):
-        return "DRUM"
-    if norm.startswith(("TL", "TO", "CTL", "CTO", "PC", "PL", "TN", "CF", "CE", "CB", "CC", "Q", "W", "106R", "006R", "113R", "TK", "MLT")):
-        return "CARTRIDGE"
-    return ""
-
-
 def detect_supply_family(*parts: Any) -> str:
     text = contains_text(" ".join(str(p or "") for p in parts))
     family_markers = [
         ("CHIP", ["ЧИП", " CHIP "]),
-        ("DRUM", ["ФОТОБАРАБ", "БАРАБАН", "DRUM", "OPC", "IMAGING UNIT", "IMAGE UNIT", "ДРАМ-КАРТРИДЖ"]),
+        ("DRUM", ["ФОТОБАРАБ", "БАРАБАН", "DRUM", "OPC", "IMAGING UNIT", "IMAGE UNIT"]),
         ("BLADE", ["РАКЕЛ", "ЛЕЗВИ", "WIPER", "BLADE", "DOCTOR BLADE", "ДОЗИРУЮЩ"]),
         ("DEVELOPER", ["ДЕВЕЛОП", "DEVELOPER"]),
         ("FUSER", ["ПЕЧКА", "FUSER"]),
         ("BELT", ["BELT", "ЛЕНТА ПЕРЕНОСА", "TRANSFER BELT"]),
-        ("BOTTLE", ["БУНКЕР ОТРАБОТАННОГО ТОНЕРА", "БУТЫЛ", "BOTTLE", "WASTE TONER"]),
-        ("HEAD", ["ПЕЧАТАЮЩАЯ ГОЛОВКА", "PRINTHEAD", "PRINT HEAD", "ГОЛОВК"]),
-        ("CARTRIDGE", ["КАРТРИДЖ", "TONER CARTRIDGE", "INK CARTRIDGE", "RIBBON", "ТОНЕР", " TONER ", " INK ", "TONER UNIT", "ПРИНТ-КАРТРИДЖ", "СТРУЙНЫЕ КАРТРИДЖИ", "ЛЕНТОЧНЫЕ КАРТРИДЖИ"]),
+        ("BOTTLE", ["БУТЫЛ", "BOTTLE", "WASTE TONER"]),
+        ("CARTRIDGE", ["КАРТРИДЖ", "TONER CARTRIDGE", "INK CARTRIDGE", "RIBBON", "ТОНЕР", " TONER ", " INK "]),
     ]
     for family, markers in family_markers:
         for marker in markers:
             if contains_text(marker).strip() in text:
                 return family
-
-    if "ЧЕРНИЛ" in text or "РАСХОДНЫЕ МАТЕРИАЛЫ ДЛЯ" in text:
-        return "CARTRIDGE"
-
-    for part in parts:
-        fam = infer_family_from_code(part)
-        if fam:
-            return fam
-
     return "OTHER"
 
 
 def family_compatible(own_row: dict[str, Any], dist_row: pd.Series) -> bool:
-    own_family = detect_supply_family(
-        own_row.get("article", ""),
-        own_row.get("name", ""),
-        own_row.get("product_type", ""),
-        own_row.get("group_root", ""),
-        own_row.get("group_level2", ""),
-    )
-    dist_family = detect_supply_family(
-        dist_row.get("article", ""),
-        dist_row.get("alt_article", ""),
-        dist_row.get("name", ""),
-        dist_row.get("product_type", ""),
-        dist_row.get("group_root", ""),
-        dist_row.get("group_level2", ""),
-    )
+    own_family = detect_supply_family(own_row.get("article", ""), own_row.get("name", ""))
+    dist_family = detect_supply_family(dist_row.get("article", ""), dist_row.get("alt_article", ""), dist_row.get("name", ""))
     if own_family == "OTHER":
         return True
     if dist_family == "OTHER":
         return False
     return own_family == dist_family
 
-
-
-def _mark_match_rank(df: pd.DataFrame, rank: int, kind: str) -> pd.DataFrame:
-    out = df.copy()
-    out["_match_rank"] = rank
-    out["_direct_match_kind"] = kind
-    return out
-
-
-def _resource_exact_candidates(working: pd.DataFrame, search_codes: list[str]) -> pd.DataFrame:
-    primary_exact = working[working["article_norm"].isin(search_codes)].copy()
-    if not primary_exact.empty:
-        return _mark_match_rank(primary_exact, 0, "article")
-
-    alt_exact = working[working["alt_article_norm"].isin(search_codes)].copy()
-    if not alt_exact.empty:
-        return _mark_match_rank(alt_exact, 1, "alt_article")
-
-    pantum_p = working[working.apply(lambda r: any(pantum_safe_p_alias_match(code, r) for code in search_codes), axis=1)].copy()
-    if not pantum_p.empty:
-        pantum_p = pantum_p[~pantum_p["article_norm"].isin(search_codes) & ~pantum_p["alt_article_norm"].isin(search_codes)].copy()
-        if not pantum_p.empty:
-            return _mark_match_rank(pantum_p, 2, "pantum_alias")
-
-    name_code = working[working["name_code_list"].apply(lambda codes: any(code in codes for code in search_codes) if isinstance(codes, list) else False)].copy()
-    if not name_code.empty:
-        return _mark_match_rank(name_code, 3, "name_code")
-
-    return working.iloc[0:0].copy()
 
 
 def resource_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str, own_codes: Optional[list[str]] = None) -> pd.DataFrame:
@@ -1843,52 +1757,6 @@ def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article
     return working.iloc[0:0].copy()
 
 
-def _direct_source_fallback_candidates(df: pd.DataFrame, choice: dict[str, Any], token: str, min_qty: float = 1.0) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df.iloc[0:0].copy()
-
-    own_brand = str(choice.get("brand", "") or "")
-    own_article_norm = normalize_article(choice.get("article", ""))
-    token_norm = normalize_article(token)
-    own_compare_codes = row_catalog_compare_codes(choice, token)
-    search_codes = unique_norm_codes([token_norm, own_article_norm, *(own_compare_codes or [])])
-    if not search_codes:
-        return df.iloc[0:0].copy()
-
-    working = df.copy()
-    working = working[working["free_qty"].astype(float) >= float(min_qty)].copy()
-    if working.empty:
-        return working
-
-    exact_mask = working["article_norm"].isin(search_codes) | working["alt_article_norm"].isin(search_codes)
-    pantum_mask = working.apply(lambda r: any(pantum_safe_p_alias_match(code, r, own_brand=own_brand) for code in search_codes), axis=1)
-    cand = working[exact_mask | pantum_mask].copy()
-    if cand.empty:
-        return cand
-
-    cand = cand[~cand.apply(row_has_bad_offer_markers, axis=1)].copy()
-    if cand.empty:
-        return cand
-
-    if "is_original" in cand.columns:
-        orig = cand[cand["is_original"] == True].copy()
-        if not orig.empty:
-            cand = orig
-
-    cand = cand[cand.apply(lambda r: is_confident_distributor_row_for_choice(r, choice, token_norm, own_codes=own_compare_codes), axis=1)].copy()
-    if cand.empty:
-        return cand
-
-    if own_brand:
-        brand_filtered = cand[cand["brand"].apply(lambda x: brand_match(own_brand, str(x)))]
-        if not brand_filtered.empty:
-            cand = brand_filtered
-
-    cand["_match_rank"] = cand.get("_match_rank", 50)
-    cand["_fallback_used"] = True
-    return cand
-
-
 def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, Any], token: str, search_mode: str, min_qty: float = 1.0) -> dict[str, Any] | None:
     if df is None or df.empty:
         return None
@@ -1901,16 +1769,11 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
     own_compare_codes = row_catalog_compare_codes(choice, token)
 
     cand = distributor_search_candidates(df, token_norm, own_article_norm, search_mode, own_codes=own_compare_codes)
-    used_fallback = False
-    if cand.empty:
-        cand = _direct_source_fallback_candidates(df, choice, token, min_qty=min_qty)
-        used_fallback = not cand.empty
     if cand.empty:
         return None
     cand = cand[cand["free_qty"].astype(float) >= float(min_qty)].copy()
-    strict = cand[cand["is_good_offer"] == True].copy() if "is_good_offer" in cand.columns else cand.copy()
-    if not strict.empty:
-        cand = strict
+    if "is_good_offer" in cand.columns:
+        cand = cand[cand["is_good_offer"] == True].copy()
     if cand.empty:
         return None
     if own_is_original:
@@ -1939,7 +1802,6 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
         "brand": str(row.get("brand", "")),
         "free_qty": float(row.get("free_qty", 0) or 0),
         "match_rank": int(row.get("_match_rank", 99) or 99),
-        "fallback_used": bool(used_fallback or bool(row.get("_fallback_used", False))),
     }
     if own_price > 0:
         delta = own_price - price
@@ -1954,8 +1816,6 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
             offer["status"] = "лучше нас"
         else:
             offer["status"] = "дороже нас"
-    if offer.get("fallback_used"):
-        offer["status_note"] = "найдено по прямому коду"
     return offer
 
 
@@ -1973,104 +1833,6 @@ def get_distributor_offers_for_choice(choice: dict[str, Any], token: str, search
     return offers
 
 
-
-
-def diagnose_distributor_source(df: pd.DataFrame, choice: dict[str, Any], token: str, search_mode: str, min_qty: float = 1.0) -> dict[str, Any]:
-    source_name = "Источник"
-    try:
-        source_name = str(df["distributor"].iloc[0])
-    except Exception:
-        pass
-
-    result: dict[str, Any] = {
-        "distributor": source_name,
-        "status": "нет совпадения",
-        "reason": "не найдено по артикулу/названию",
-        "price": pd.NA,
-        "free_qty": pd.NA,
-        "article": "",
-        "name": "",
-    }
-
-    if df is None or df.empty:
-        result["reason"] = "файл не загружен или пуст"
-        return result
-
-    own_brand = str(choice.get("brand", "") or "")
-    own_article_norm = normalize_article(choice.get("article", ""))
-    token_norm = normalize_article(token)
-    own_compare_codes = row_catalog_compare_codes(choice, token)
-    search_codes = unique_norm_codes([token_norm, own_article_norm, *(own_compare_codes or [])])
-    if not search_codes:
-        result["reason"] = "пустой набор кодов"
-        return result
-
-    direct = df[
-        df["article_norm"].isin(search_codes)
-        | df["alt_article_norm"].isin(search_codes)
-        | df.apply(lambda r: any(pantum_safe_p_alias_match(code, r, own_brand=own_brand) for code in search_codes), axis=1)
-        | df["name_code_list"].apply(lambda codes: any(code in codes for code in search_codes) if isinstance(codes, list) else False)
-    ].copy()
-
-    if direct.empty:
-        return result
-
-    result["reason"] = "код найден"
-
-    qty_pool = direct[direct["free_qty"].astype(float) >= float(min_qty)].copy()
-    if qty_pool.empty:
-        sample = direct.sort_values(["free_qty", "price"], ascending=[False, True]).iloc[0]
-        result.update({
-            "article": str(sample.get("article", "")),
-            "name": str(sample.get("name", "")),
-            "price": float(sample.get("price", 0) or 0),
-            "free_qty": float(sample.get("free_qty", 0) or 0),
-            "reason": f"код найден, но остаток меньше {fmt_qty(min_qty)}",
-        })
-        return result
-
-    good_pool = qty_pool[qty_pool["is_good_offer"] == True].copy() if "is_good_offer" in qty_pool.columns else qty_pool.copy()
-    if good_pool.empty:
-        sample = qty_pool.sort_values(["price", "free_qty"], ascending=[True, False]).iloc[0]
-        flags = []
-        for key,label in [("resource_type_ok","тип продукции"),("resource_brand_ok","бренд"),("ocs_type_ok","категория OCS"),("ocs_brand_ok","бренд OCS"),("merlion_root_ok","группа 1"),("merlion_group2_ok","группа 2"),("merlion_type_ok","группа 3"),("merlion_brand_ok","бренд Мерлион")]:
-            if key in qty_pool.columns and not bool(sample.get(key, True)):
-                flags.append(label)
-        if not bool(sample.get("is_original", True)):
-            flags.append("неоригинал")
-        if row_has_bad_offer_markers(sample) or row_explicitly_flagged_bad(sample):
-            flags.append("плохой оффер")
-        result.update({
-            "article": str(sample.get("article", "")),
-            "name": str(sample.get("name", "")),
-            "price": float(sample.get("price", 0) or 0),
-            "free_qty": float(sample.get("free_qty", 0) or 0),
-            "reason": "код найден, но отрезано фильтром: " + (", ".join(flags) if flags else "жёсткие правила"),
-        })
-        return result
-
-    if own_brand:
-        brand_filtered = good_pool[good_pool["brand"].apply(lambda x: brand_match(own_brand, str(x)))]
-        if brand_filtered.empty:
-            sample = good_pool.sort_values(["price", "free_qty"], ascending=[True, False]).iloc[0]
-            result.update({
-                "article": str(sample.get("article", "")),
-                "name": str(sample.get("name", "")),
-                "price": float(sample.get("price", 0) or 0),
-                "free_qty": float(sample.get("free_qty", 0) or 0),
-                "reason": "код найден, но бренд не совпал",
-            })
-            return result
-
-    sample = good_pool.sort_values(["price", "free_qty"], ascending=[True, False]).iloc[0]
-    result.update({
-        "article": str(sample.get("article", "")),
-        "name": str(sample.get("name", "")),
-        "price": float(sample.get("price", 0) or 0),
-        "free_qty": float(sample.get("free_qty", 0) or 0),
-        "reason": "код найден, пройдены фильтры",
-    })
-    return result
 
 def find_best_distributor_offer_for_choice(choice: dict[str, Any], token: str, search_mode: str, min_qty: float = 1.0) -> dict[str, Any] | None:
     own_price = float(choice.get("sale_price", 0) or 0)
@@ -2128,11 +1890,11 @@ def build_all_distributor_prices_df(result_df: pd.DataFrame, search_mode: str, m
     if result_df is None or result_df.empty:
         return pd.DataFrame()
 
-    source_dfs: list[tuple[str, pd.DataFrame]] = []
+    connected_sources = []
     for state_key, label in [("resource_df", "Ресурс"), ("ocs_df", "OCS"), ("merlion_df", "Мерлион")]:
         df = st.session_state.get(state_key)
         if df is not None and not df.empty:
-            source_dfs.append((label, df))
+            connected_sources.append(label)
 
     for _, row in result_df.iterrows():
         article = str(row.get("article", "") or "")
@@ -2143,36 +1905,66 @@ def build_all_distributor_prices_df(result_df: pd.DataFrame, search_mode: str, m
         selected_price = get_selected_price_raw(row, str(price_mode or "-12%"), bool(round100), float(custom_discount)) if price_mode else None
 
         rows.append({
-            "Артикул": article, "Название": name, "Производитель": brand, "Источник": "Мы",
-            "Наша цена": own_price, "Наша цена выбранная": selected_price, "Наш остаток": own_qty,
-            "Цена": own_price, "Остаток": own_qty, "Разница к нам, руб": 0.0, "Разница к нам, %": 0.0,
-            "Статус": "наша позиция", "Причина": "", "Артикул источника": article, "Название источника": name,
+            "Артикул": article,
+            "Название": name,
+            "Производитель": brand,
+            "Источник": "Мы",
+            "Наша цена": own_price,
+            "Наша цена выбранная": selected_price,
+            "Наш остаток": own_qty,
+            "Цена": own_price,
+            "Остаток": own_qty,
+            "Разница к нам, руб": 0.0,
+            "Разница к нам, %": 0.0,
+            "Статус": "наша позиция",
+            "Артикул источника": article,
+            "Название источника": name,
         })
 
-        choice = {"article": article, "name": name, "brand": brand, "sale_price": own_price, "row_key": str(row.get("article_norm") or normalize_article(article))}
+        choice = {
+            "article": article,
+            "name": name,
+            "brand": brand,
+            "sale_price": own_price,
+            "row_key": str(row.get("article_norm") or normalize_article(article)),
+        }
         offers = {str(offer.get("distributor", "")): offer for offer in get_distributor_offers_for_choice(choice, article, search_mode, min_qty=min_qty)}
 
-        for source_name, source_df in source_dfs:
+        for source_name in connected_sources:
             offer = offers.get(source_name)
             if offer:
                 rows.append({
-                    "Артикул": article, "Название": name, "Производитель": brand, "Источник": source_name,
-                    "Наша цена": own_price, "Наша цена выбранная": selected_price, "Наш остаток": own_qty,
-                    "Цена": float(offer.get("price", 0) or 0), "Остаток": float(offer.get("free_qty", 0) or 0),
-                    "Разница к нам, руб": float(offer.get("delta", 0) or 0), "Разница к нам, %": round(float(offer.get("delta_percent", 0) or 0), 2),
+                    "Артикул": article,
+                    "Название": name,
+                    "Производитель": brand,
+                    "Источник": source_name,
+                    "Наша цена": own_price,
+                    "Наша цена выбранная": selected_price,
+                    "Наш остаток": own_qty,
+                    "Цена": float(offer.get("price", 0) or 0),
+                    "Остаток": float(offer.get("free_qty", 0) or 0),
+                    "Разница к нам, руб": float(offer.get("delta", 0) or 0),
+                    "Разница к нам, %": round(float(offer.get("delta_percent", 0) or 0), 2),
                     "Статус": str(offer.get("status", "найдено")),
-                    "Причина": str(offer.get("status_note", "код найден, пройдены фильтры") or "код найден, пройдены фильтры"),
-                    "Артикул источника": str(offer.get("article", "") or ""), "Название источника": str(offer.get("name", "") or ""),
+                    "Артикул источника": str(offer.get("article", "") or ""),
+                    "Название источника": str(offer.get("name", "") or ""),
                 })
             else:
-                diag = diagnose_distributor_source(source_df, choice, article, search_mode, min_qty=min_qty)
                 rows.append({
-                    "Артикул": article, "Название": name, "Производитель": brand, "Источник": source_name,
-                    "Наша цена": own_price, "Наша цена выбранная": selected_price, "Наш остаток": own_qty,
-                    "Цена": diag.get("price", pd.NA), "Остаток": diag.get("free_qty", pd.NA),
-                    "Разница к нам, руб": pd.NA, "Разница к нам, %": pd.NA,
-                    "Статус": str(diag.get("status", "нет совпадения")), "Причина": str(diag.get("reason", "нет совпадения")),
-                    "Артикул источника": str(diag.get("article", "") or ""), "Название источника": str(diag.get("name", "") or ""),
+                    "Артикул": article,
+                    "Название": name,
+                    "Производитель": brand,
+                    "Источник": source_name,
+                    "Наша цена": own_price,
+                    "Наша цена выбранная": selected_price,
+                    "Наш остаток": own_qty,
+                    "Цена": pd.NA,
+                    "Остаток": pd.NA,
+                    "Разница к нам, руб": pd.NA,
+                    "Разница к нам, %": pd.NA,
+                    "Статус": "нет нормального совпадения",
+                    "Артикул источника": "",
+                    "Название источника": "",
                 })
 
     if not rows:
@@ -2182,6 +1974,8 @@ def build_all_distributor_prices_df(result_df: pd.DataFrame, search_mode: str, m
     out["_is_own"] = out["Источник"].map(lambda x: 0 if str(x) == "Мы" else 1)
     out = out.sort_values(["Артикул", "_is_own", "Цена", "Источник"], ascending=[True, True, True, True], na_position="last").drop(columns=["_is_own"]).reset_index(drop=True)
     return out
+
+
 
 def all_prices_to_excel_bytes(df: pd.DataFrame) -> bytes:
     bio = io.BytesIO()
@@ -2417,7 +2211,7 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
         "offer-bad": "🔴 дороже",
         "offer-neutral": "🟡 цена равна",
         "offer-own": "🔵 наша позиция",
-        "offer-muted": "⚪ нет совпадения",
+        "offer-muted": "⚪ без статуса",
     }
 
     for article, group_df in all_prices_df.groupby("Артикул", sort=False):
@@ -2476,13 +2270,10 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
                         f"<div class='offer-card-meta'>Разница к нам: {sign}{html.escape(fmt_price(diff_rub))} руб.{html.escape(diff_pct_txt)}</div>"
                     )
 
-                reason_txt = normalize_text(rec.get("Причина", ""))
                 if source_article:
                     card_lines.append(f"<div class='offer-card-code'>{html.escape(source_article)}</div>")
                 if source_name:
                     card_lines.append(f"<div class='offer-card-name'>{html.escape(source_name)}</div>")
-                if source != "Мы" and reason_txt:
-                    card_lines.append(f"<div class='offer-card-reason'>{html.escape(reason_txt)}</div>")
 
                 st.markdown(
                     "<div class='offer-card-simple'>" + "".join(card_lines) + "</div>",
@@ -2490,7 +2281,7 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
                 )
 
         show_df = work_df[
-            ["Источник", "Цена", "Остаток", "Разница к нам, руб", "Разница к нам, %", "Статус", "Причина", "Артикул источника", "Название источника"]
+            ["Источник", "Цена", "Остаток", "Разница к нам, руб", "Разница к нам, %", "Статус", "Артикул источника", "Название источника"]
         ].copy()
         show_df["Цена"] = show_df["Цена"].apply(lambda v: fmt_price(v) if pd.notna(v) else "")
         show_df["Остаток"] = show_df["Остаток"].apply(lambda v: fmt_qty(v) if pd.notna(v) else "")
