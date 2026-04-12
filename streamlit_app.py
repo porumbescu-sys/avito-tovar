@@ -46,13 +46,6 @@ AVITO_COLUMN_ALIASES = {
     "url": ["Ссылка", "URL", "Ссылка на объявление", "Link"],
 }
 
-ARTICLE_REFERENCE_COLUMN_ALIASES = {
-    "brand": ["Производитель", "Бренд", "Марка", "brand"],
-    "article": ["Артикул", "Короткий артикул", "Наш артикул", "article"],
-    "manufacturer_article": ["Артикул производителя", "OEM", "OEM-код", "Код производителя", "manufacturer_article"],
-    "name": ["Номенклатура", "Наименование", "Название", "name"],
-}
-
 COLOR_KEYWORDS = [
     ("желтый", "желтый"),
     ("yellow", "желтый"),
@@ -75,12 +68,6 @@ COLOR_KEYWORDS = [
     ("green", "зеленый"),
     ("зел", "зеленый"),
 ]
-
-CYRILLIC_ARTICLE_TRANSLATION = str.maketrans({
-    "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "У": "Y", "Х": "X",
-    "а": "A", "в": "B", "е": "E", "к": "K", "м": "M", "н": "H", "о": "O", "р": "P", "с": "C", "т": "T", "у": "Y", "х": "X",
-    "Ё": "E", "ё": "E",
-})
 
 ARTICLE_PIECE_RE = re.compile(r"^[A-Za-zА-Яа-я0-9._-]{3,}$")
 SERIES_SUFFIX_ORDER = {
@@ -287,11 +274,8 @@ def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, An
 
 def init_state() -> None:
     defaults = {
-        "catalog_base_df": None,
         "catalog_df": None,
         "catalog_name": "ещё не загружен",
-        "article_ref_df": None,
-        "article_ref_name": "ещё не загружен",
         "avito_df": None,
         "avito_name": "ещё не загружен",
         "resource_df": None,
@@ -343,10 +327,7 @@ def normalize_text(value: object) -> str:
 
 def normalize_article(value: object) -> str:
     text = normalize_text(value)
-    if not text:
-        return ""
-    text = text.translate(CYRILLIC_ARTICLE_TRANSLATION)
-    return re.sub(r"[^A-Za-z0-9]", "", text).upper()
+    return re.sub(r"[^A-Za-zА-Яа-я0-9]", "", text).upper()
 
 
 def contains_text(value: object) -> str:
@@ -625,123 +606,6 @@ def find_column(columns: list[str], candidates: list[str]) -> Optional[str]:
 def detect_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     return {key: find_column(list(df.columns), aliases) for key, aliases in COLUMN_ALIASES.items()}
 
-
-
-def detect_article_reference_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
-    return {key: find_column(list(df.columns), aliases) for key, aliases in ARTICLE_REFERENCE_COLUMN_ALIASES.items()}
-
-
-@st.cache_data(show_spinner=False)
-def load_article_reference_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
-    suffix = Path(file_name).suffix.lower()
-    bio = io.BytesIO(file_bytes)
-    if suffix == ".csv":
-        try:
-            raw = pd.read_csv(bio)
-        except UnicodeDecodeError:
-            bio.seek(0)
-            raw = pd.read_csv(bio, encoding="cp1251")
-    else:
-        raw = pd.read_excel(bio)
-
-    raw = raw.dropna(how="all")
-    mapping = detect_article_reference_columns(raw)
-    if not mapping.get("article") and not mapping.get("manufacturer_article"):
-        raise ValueError("Не удалось определить колонки справочника: нужен хотя бы 'Артикул' или 'Артикул производителя'.")
-    if not mapping.get("name"):
-        raise ValueError("Не удалось определить колонку 'Номенклатура' в справочнике.")
-
-    data = pd.DataFrame()
-    data["article"] = raw[mapping["article"]].map(normalize_text) if mapping.get("article") else ""
-    data["article_norm"] = raw[mapping["article"]].map(normalize_article) if mapping.get("article") else ""
-    data["manufacturer_article"] = raw[mapping["manufacturer_article"]].map(normalize_text) if mapping.get("manufacturer_article") else ""
-    data["manufacturer_article_norm"] = raw[mapping["manufacturer_article"]].map(normalize_article) if mapping.get("manufacturer_article") else ""
-    data["name"] = raw[mapping["name"]].map(normalize_text)
-    data["brand"] = raw.apply(
-        lambda r: normalize_or_infer_brand(r[mapping["brand"]], r[mapping["name"]]) if mapping.get("brand") else infer_brand_from_name(r[mapping["name"]]),
-        axis=1,
-    )
-    data["name_code_list"] = data["name"].map(extract_article_candidates_from_text)
-    data["ref_code_list"] = data.apply(
-        lambda row: unique_norm_codes([row.get("article", ""), row.get("manufacturer_article", ""), *(row.get("name_code_list", []) or [])]),
-        axis=1,
-    )
-    data["is_negative"] = data.apply(
-        lambda row: is_negative_substitute_text(row.get("article", ""), row.get("manufacturer_article", ""), row.get("name", ""), row.get("brand", "")),
-        axis=1,
-    )
-    data = data[data["ref_code_list"].map(lambda x: isinstance(x, list) and len(x) > 0)].copy()
-    data = data[data["is_negative"] != True].copy()
-    data = data.reset_index(drop=True)
-    return data
-
-
-def build_article_reference_lookup(reference_df: pd.DataFrame) -> dict[str, list[int]]:
-    lookup: dict[str, list[int]] = {}
-    if reference_df is None or reference_df.empty:
-        return lookup
-    for idx, row in reference_df.iterrows():
-        for code in row.get("ref_code_list", []) or []:
-            norm = normalize_article(code)
-            if not norm:
-                continue
-            lookup.setdefault(norm, []).append(int(idx))
-    return lookup
-
-
-def expand_catalog_codes_with_reference(catalog_df: pd.DataFrame | None, reference_df: pd.DataFrame | None) -> pd.DataFrame | None:
-    if catalog_df is None:
-        return None
-    if reference_df is None or reference_df.empty:
-        out = catalog_df.copy()
-        if "reference_code_list" not in out.columns:
-            out["reference_code_list"] = [[] for _ in range(len(out))]
-        return out
-
-    ref_lookup = build_article_reference_lookup(reference_df)
-    out = catalog_df.copy()
-
-    def _expand_row(row: pd.Series) -> pd.Series:
-        base_codes = unique_norm_codes(row.get("all_code_list", []) or [row.get("article", ""), *(row.get("name_code_list", []) or [])])
-        if not base_codes:
-            row["reference_code_list"] = []
-            row["all_code_list"] = base_codes
-            return row
-        if is_negative_substitute_text(row.get("article", ""), row.get("name", ""), row.get("brand", "")):
-            row["reference_code_list"] = []
-            row["all_code_list"] = base_codes
-            return row
-
-        own_brand = str(row.get("brand", "") or "")
-        matched_ref_rows: set[int] = set()
-        for code in base_codes:
-            for ref_idx in ref_lookup.get(code, []):
-                ref_row = reference_df.iloc[ref_idx]
-                ref_brand = str(ref_row.get("brand", "") or "")
-                if own_brand and ref_brand and not brand_match(own_brand, ref_brand):
-                    continue
-                matched_ref_rows.add(int(ref_idx))
-
-        ref_codes: list[str] = []
-        for ref_idx in sorted(matched_ref_rows):
-            ref_row = reference_df.iloc[ref_idx]
-            ref_codes.extend(ref_row.get("ref_code_list", []) or [])
-
-        row["reference_code_list"] = unique_norm_codes(ref_codes)
-        row["all_code_list"] = unique_norm_codes([*base_codes, *row["reference_code_list"]])
-        return row
-
-    out = out.apply(_expand_row, axis=1)
-    return out
-
-
-def rebuild_catalog_effective_df() -> None:
-    base_df = st.session_state.get("catalog_base_df")
-    ref_df = st.session_state.get("article_ref_df")
-    if isinstance(base_df, pd.DataFrame):
-        st.session_state.catalog_df = expand_catalog_codes_with_reference(base_df, ref_df)
-    else:
-        st.session_state.catalog_df = None
 
 @st.cache_data(show_spinner=False)
 def load_price_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
@@ -1414,7 +1278,7 @@ def load_resource_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     data["article"] = df.get("Артикул", "").map(normalize_text)
     data["alt_article"] = df.get("Артикул производителя", "").map(normalize_text)
     data["name"] = df.get("Номенклатура", "").map(normalize_text)
-    data["brand"] = pd.Series(df.get("Производитель", ""), index=df.index).combine(df.get("Номенклатура", ""), lambda b, n: normalize_or_infer_brand(b, n))
+    data["brand"] = df.get("Производитель", "").map(normalize_text)
     data["product_type"] = df.get("Тип продукции", "").map(normalize_text) if "Тип продукции" in df.columns else ""
     data["price"] = pd.to_numeric(df.get("Цена, руб", 0), errors="coerce")
     data["free_qty"] = df.get("Доступно Москва", 0).map(parse_resource_qty)
@@ -1443,7 +1307,7 @@ def load_ocs_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     data["article"] = df.get("Каталожный номер", "").map(normalize_text)
     data["alt_article"] = df.get("Номенклатурный номер", "").map(normalize_text) if "Номенклатурный номер" in df.columns else ""
     data["name"] = df.get("Наименование", "").map(normalize_text)
-    data["brand"] = pd.Series(df.get("Производитель", ""), index=df.index).combine(df.get("Наименование", ""), lambda b, n: normalize_or_infer_brand(b, n))
+    data["brand"] = df.get("Производитель", "").map(normalize_text)
     data["product_type"] = df.get("Категория оборудования", "").map(normalize_text) if "Категория оборудования" in df.columns else ""
     data["price"] = pd.to_numeric(df.get("Цена", 0), errors="coerce")
     data["free_qty"] = df.get("Доступно для резерва", 0).map(parse_ocs_qty)
@@ -1472,7 +1336,7 @@ def load_merlion_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     data["article"] = first_existing_series(df, ["Код производителя"], "").map(normalize_text)
     data["alt_article"] = first_existing_series(df, ["Доп. Номер"], "").map(normalize_text)
     data["name"] = first_existing_series(df, ["Наименование"], "").map(normalize_text)
-    data["brand"] = first_existing_series(df, ["Бренд", "Производитель"], "").combine(first_existing_series(df, ["Наименование"], ""), lambda b, n: normalize_or_infer_brand(b, n))
+    data["brand"] = first_existing_series(df, ["Бренд", "Производитель"], "").map(normalize_text)
     data["group_root"] = first_existing_series(df, ["Группа 1", "Группа1", "Товарная группа", "Группа"], "").map(normalize_text)
     data["group_level2"] = first_existing_series(df, ["Группа 2", "Группа2", "Подгруппа", "Категория"], "").map(normalize_text)
     data["product_type"] = first_existing_series(df, ["Группа 3", "Группа3", "Вид товара", "Подкатегория"], "").map(normalize_text)
@@ -1748,52 +1612,6 @@ def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article
     return working.iloc[0:0].copy()
 
 
-def _direct_source_fallback_candidates(df: pd.DataFrame, choice: dict[str, Any], token: str, min_qty: float = 1.0) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df.iloc[0:0].copy()
-
-    own_brand = str(choice.get("brand", "") or "")
-    own_article_norm = normalize_article(choice.get("article", ""))
-    token_norm = normalize_article(token)
-    own_compare_codes = row_catalog_compare_codes(choice, token)
-    search_codes = unique_norm_codes([token_norm, own_article_norm, *(own_compare_codes or [])])
-    if not search_codes:
-        return df.iloc[0:0].copy()
-
-    working = df.copy()
-    working = working[working["free_qty"].astype(float) >= float(min_qty)].copy()
-    if working.empty:
-        return working
-
-    exact_mask = working["article_norm"].isin(search_codes) | working["alt_article_norm"].isin(search_codes)
-    pantum_mask = working.apply(lambda r: any(pantum_safe_p_alias_match(code, r, own_brand=own_brand) for code in search_codes), axis=1)
-    cand = working[exact_mask | pantum_mask].copy()
-    if cand.empty:
-        return cand
-
-    cand = cand[~cand.apply(row_has_bad_offer_markers, axis=1)].copy()
-    if cand.empty:
-        return cand
-
-    if "is_original" in cand.columns:
-        orig = cand[cand["is_original"] == True].copy()
-        if not orig.empty:
-            cand = orig
-
-    cand = cand[cand.apply(lambda r: is_confident_distributor_row_for_choice(r, choice, token_norm, own_codes=own_compare_codes), axis=1)].copy()
-    if cand.empty:
-        return cand
-
-    if own_brand:
-        brand_filtered = cand[cand["brand"].apply(lambda x: brand_match(own_brand, str(x)))]
-        if not brand_filtered.empty:
-            cand = brand_filtered
-
-    cand["_match_rank"] = cand.get("_match_rank", 50)
-    cand["_fallback_used"] = True
-    return cand
-
-
 def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, Any], token: str, search_mode: str, min_qty: float = 1.0) -> dict[str, Any] | None:
     if df is None or df.empty:
         return None
@@ -1806,16 +1624,11 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
     own_compare_codes = row_catalog_compare_codes(choice, token)
 
     cand = distributor_search_candidates(df, token_norm, own_article_norm, search_mode, own_codes=own_compare_codes)
-    used_fallback = False
-    if cand.empty:
-        cand = _direct_source_fallback_candidates(df, choice, token, min_qty=min_qty)
-        used_fallback = not cand.empty
     if cand.empty:
         return None
     cand = cand[cand["free_qty"].astype(float) >= float(min_qty)].copy()
-    strict = cand[cand["is_good_offer"] == True].copy() if "is_good_offer" in cand.columns else cand.copy()
-    if not strict.empty:
-        cand = strict
+    if "is_good_offer" in cand.columns:
+        cand = cand[cand["is_good_offer"] == True].copy()
     if cand.empty:
         return None
     if own_is_original:
@@ -1844,7 +1657,6 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
         "brand": str(row.get("brand", "")),
         "free_qty": float(row.get("free_qty", 0) or 0),
         "match_rank": int(row.get("_match_rank", 99) or 99),
-        "fallback_used": bool(used_fallback or bool(row.get("_fallback_used", False))),
     }
     if own_price > 0:
         delta = own_price - price
@@ -1859,8 +1671,6 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
             offer["status"] = "лучше нас"
         else:
             offer["status"] = "дороже нас"
-    if offer.get("fallback_used"):
-        offer["status_note"] = "найдено по прямому коду"
     return offer
 
 
@@ -2031,54 +1841,6 @@ def all_prices_to_excel_bytes(df: pd.DataFrame) -> bytes:
 
 
 
-def status_visual_class(status: str) -> str:
-    status_text = contains_text(status)
-    if "ЛУЧШЕ" in status_text:
-        return "offer-good"
-    if "ДОРОЖЕ" in status_text:
-        return "offer-bad"
-    if "РАВНА" in status_text:
-        return "offer-neutral"
-    if "НАША ПОЗИЦИЯ" in status_text:
-        return "offer-own"
-    return "offer-muted"
-
-
-def render_results_insight_dashboard(result_df: pd.DataFrame, compare_map: dict[str, dict[str, Any]]) -> None:
-    found_count = len(result_df) if isinstance(result_df, pd.DataFrame) else 0
-    better_rows = 0
-    avg_gain = 0.0
-    gains: list[float] = []
-    connected = []
-    for key, label in [("resource_df", "Ресурс"), ("ocs_df", "OCS"), ("merlion_df", "Мерлион")]:
-        df = st.session_state.get(key)
-        if isinstance(df, pd.DataFrame) and not df.empty:
-            connected.append(label)
-    for item in (compare_map or {}).values():
-        offer = item.get("best_offer") if isinstance(item, dict) else None
-        if offer:
-            better_rows += 1
-            try:
-                gains.append(float(offer.get("delta_percent", 0) or 0))
-            except Exception:
-                pass
-    if gains:
-        avg_gain = sum(gains) / len(gains)
-
-    cards = [
-        ("🔎", "Найдено позиций", str(found_count), "Сколько строк вошло в текущий результат поиска"),
-        ("💚", "Есть цена лучше", str(better_rows), "Сколько позиций можно потенциально пересмотреть по цене"),
-        ("📈", "Средняя выгода", (f"{avg_gain:.1f}%" if gains else "—"), "Средняя выгода по тем позициям, где поставщик реально дешевле нас"),
-        ("🧩", "Подключено источников", str(len(connected)), (", ".join(connected) if connected else "Файлы дистрибьютеров пока не загружены")),
-    ]
-    cards_html = "".join(
-        f"<div class='insight-card'><div class='insight-top'><span class='insight-icon'>{icon}</span><span class='insight-label'>{label}</span></div><div class='insight-value'>{value}</div><div class='insight-note'>{note}</div></div>"
-        for icon, label, value, note in cards
-    )
-    st.markdown(f"<div class='insight-grid'>{cards_html}</div>", unsafe_allow_html=True)
-
-
-
 
 
 def build_product_analysis_df(result_df: pd.DataFrame, search_mode: str, min_qty: float = 1.0) -> pd.DataFrame:
@@ -2234,108 +1996,27 @@ def build_product_analysis_workbook_bytes(result_df: pd.DataFrame, search_mode: 
     return bio.read()
 
 
-
 def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: str, min_qty: float, price_mode: str, round100: bool, custom_discount: float) -> None:
-    all_prices_df = build_all_distributor_prices_df(
-        result_df,
-        search_mode,
-        min_qty=min_qty,
-        price_mode=price_mode,
-        round100=round100,
-        custom_discount=custom_discount,
-    )
+    all_prices_df = build_all_distributor_prices_df(result_df, search_mode, min_qty=min_qty, price_mode=price_mode, round100=round100, custom_discount=custom_discount)
     if all_prices_df.empty:
         st.info("Для текущего запроса нет данных по всем ценам дистрибьютеров.")
         return
 
     st.caption("Здесь видно не только лучшую цену, но и следующую цену у других дистрибьютеров, плюс остаток. Это помогает не снижать цену из-за единичного хвоста на складе.")
-
-    source_order = {"Мы": 0, "Ресурс": 1, "OCS": 2, "Мерлион": 3}
-    status_label_map = {
-        "offer-good": "🟢 выгоднее",
-        "offer-bad": "🔴 дороже",
-        "offer-neutral": "🟡 цена равна",
-        "offer-own": "🔵 наша позиция",
-        "offer-muted": "⚪ без статуса",
-    }
-
     for article, group_df in all_prices_df.groupby("Артикул", sort=False):
         base_name = normalize_text(group_df.iloc[0].get("Название", ""))
-        own_row = group_df[group_df["Источник"] == "Мы"].head(1)
-
-        own_price_line = ""
-        if not own_row.empty:
-            own_price = own_row.iloc[0].get("Цена")
-            own_qty = own_row.iloc[0].get("Остаток")
-            own_price_line = f"Наша цена: {fmt_price(own_price)} руб. • Остаток: {fmt_qty(own_qty)}"
-
-        st.markdown(
-            f"""
-            <div class='all-prices-head'>
-              <div>
-                <div class='all-prices-article'>{html.escape(article)}</div>
-                <div class='all-prices-name'>{html.escape(base_name)}</div>
-                <div class='all-prices-own'>{own_price_line}</div>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        work_df = group_df.copy()
-        work_df["_rank"] = work_df["Источник"].map(lambda x: source_order.get(str(x), 99))
-        work_df = work_df.sort_values(["_rank", "Цена"], na_position="last").reset_index(drop=True)
-
-        cols = st.columns(4)
-        for idx, (_, rec) in enumerate(work_df.iterrows()):
-            with cols[idx % 4]:
-                source = str(rec.get("Источник", "") or "")
-                status = str(rec.get("Статус", "") or "")
-                status_class = status_visual_class(status)
-                badge_text = status_label_map.get(status_class, status or "найдено")
-
-                price_val = rec.get("Цена")
-                qty_val = rec.get("Остаток")
-                diff_rub = rec.get("Разница к нам, руб")
-                diff_pct = rec.get("Разница к нам, %")
-                source_article = normalize_text(rec.get("Артикул источника", ""))
-                source_name = normalize_text(rec.get("Название источника", ""))
-
-                card_lines = [
-                    f"<div class='offer-card-source'>{html.escape(source)}</div>",
-                    f"<span class='offer-status-badge {status_class}'>{html.escape(badge_text)}</span>",
-                    f"<div class='offer-card-price'>{html.escape(fmt_price(price_val) if pd.notna(price_val) else '—')} {'руб.' if pd.notna(price_val) else ''}</div>",
-                    f"<div class='offer-card-meta'>Остаток: <b>{html.escape(fmt_qty(qty_val) if pd.notna(qty_val) else '—')}</b></div>",
-                ]
-
-                if source != "Мы" and pd.notna(diff_rub):
-                    diff_pct_txt = f" • {round(float(diff_pct), 2):g}%" if pd.notna(diff_pct) else ""
-                    sign = "+" if float(diff_rub) < 0 else ""
-                    card_lines.append(
-                        f"<div class='offer-card-meta'>Разница к нам: {sign}{html.escape(fmt_price(diff_rub))} руб.{html.escape(diff_pct_txt)}</div>"
-                    )
-
-                if source_article:
-                    card_lines.append(f"<div class='offer-card-code'>{html.escape(source_article)}</div>")
-                if source_name:
-                    card_lines.append(f"<div class='offer-card-name'>{html.escape(source_name)}</div>")
-
-                st.markdown(
-                    "<div class='offer-card-simple'>" + "".join(card_lines) + "</div>",
-                    unsafe_allow_html=True,
-                )
-
-        show_df = work_df[
-            ["Источник", "Цена", "Остаток", "Разница к нам, руб", "Разница к нам, %", "Статус", "Артикул источника", "Название источника"]
-        ].copy()
+        st.markdown(f"**{article}** — {base_name}")
+        show_df = group_df[[
+            "Источник", "Цена", "Остаток", "Разница к нам, руб", "Разница к нам, %", "Статус", "Артикул источника", "Название источника"
+        ]].copy()
+        for col in ["Цена", "Остаток", "Разница к нам, руб", "Разница к нам, %"]:
+            if col not in show_df.columns:
+                continue
         show_df["Цена"] = show_df["Цена"].apply(lambda v: fmt_price(v) if pd.notna(v) else "")
         show_df["Остаток"] = show_df["Остаток"].apply(lambda v: fmt_qty(v) if pd.notna(v) else "")
         show_df["Разница к нам, руб"] = show_df["Разница к нам, руб"].apply(lambda v: fmt_price(v) if pd.notna(v) else "")
         show_df["Разница к нам, %"] = show_df["Разница к нам, %"].apply(lambda v: (str(round(float(v), 2)).replace(".0", "") + "%") if pd.notna(v) else "")
-        with st.expander(f"Таблица по {article}"):
-            st.dataframe(show_df, use_container_width=True, hide_index=True, height=min(260, 70 + len(show_df) * 36))
-
-        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+        st.dataframe(show_df, use_container_width=True, hide_index=True, height=min(260, 70 + len(show_df) * 36))
 
     st.download_button(
         "⬇️ Скачать все цены в Excel",
@@ -2343,6 +2024,7 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
         file_name="moy_tovar_all_distributor_prices.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
 
 def build_full_distributor_report(df: pd.DataFrame, threshold_percent: float, search_mode: str, min_qty: float = 1.0) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
@@ -2460,7 +2142,6 @@ def build_display_df(df: pd.DataFrame, price_mode: str, round100: bool, custom_d
             "Всего": out["total_qty"].map(fmt_qty),
             "Цена продажи": out["sale_price"].map(fmt_price),
             label: out["selected_price"].map(fmt_price),
-            "Алиасы из справочника": out.get("reference_code_list", pd.Series([[] for _ in range(len(out))])).map(lambda x: ", ".join(x) if isinstance(x, list) and x else ""),
         }
     )
     if search_mode and distributor_sources_ready():
@@ -2470,20 +2151,6 @@ def build_display_df(df: pd.DataFrame, price_mode: str, round100: bool, custom_d
         best_qty = []
         best_delta = []
         best_delta_pct = []
-        resource_dbg = []
-        ocs_dbg = []
-        merlion_dbg = []
-
-        def offer_debug_text(offer: dict[str, Any] | None) -> str:
-            if not offer:
-                return "не найдено/отфильтровано"
-            status = str(offer.get("status", "")).strip() or "найдено"
-            price = fmt_price(offer.get("price", 0))
-            qty = fmt_qty(offer.get("free_qty", 0))
-            article = normalize_text(offer.get("article", ""))
-            tail = f" • {article}" if article else ""
-            return f"{status} • {price} руб. • ост. {qty}{tail}"
-
         for _, row in df.iterrows():
             item = compare_map.get(str(row.get("article_norm", "")), {})
             offer = item.get("best_offer") if isinstance(item, dict) else None
@@ -2499,20 +2166,11 @@ def build_display_df(df: pd.DataFrame, price_mode: str, round100: bool, custom_d
                 best_qty.append("")
                 best_delta.append("")
                 best_delta_pct.append("")
-            choice = row.to_dict()
-            token = str(row.get("article", "") or "")
-            resource_dbg.append(offer_debug_text(get_best_distributor_match_for_source(st.session_state.get("resource_df"), choice, token, search_mode, min_qty=min_qty)))
-            ocs_dbg.append(offer_debug_text(get_best_distributor_match_for_source(st.session_state.get("ocs_df"), choice, token, search_mode, min_qty=min_qty)))
-            merlion_dbg.append(offer_debug_text(get_best_distributor_match_for_source(st.session_state.get("merlion_df"), choice, token, search_mode, min_qty=min_qty)))
-
         display_df["Лучший дистрибьютер"] = best_dist
         display_df["Цена дистрибьютора"] = best_price
         display_df["Остаток дистрибьютора"] = best_qty
         display_df["Лучше на, руб"] = best_delta
         display_df["Лучше на, %"] = best_delta_pct
-        display_df["Ресурс debug"] = resource_dbg
-        display_df["OCS debug"] = ocs_dbg
-        display_df["Мерлион debug"] = merlion_dbg
     return display_df
 
 
@@ -2538,126 +2196,6 @@ def render_copy_big_button(text_value: str, button_label: str = "📋 Скопи
     """
     components.html(html_block, height=58)
 
-
-
-
-def render_block_header(title: str, subtitle: str = "", icon: str = "📦", help_text: str = "") -> None:
-    tooltip_html = ""
-    if normalize_text(help_text):
-        tooltip_html = (
-            '<div class="block-help-wrap">'
-            '<div class="block-help">?</div>'
-            f'<div class="block-tooltip">{html.escape(help_text)}</div>'
-            '</div>'
-        )
-    st.markdown(
-        f"""
-        <div class="block-header">
-          <div class="block-header-main">
-            <div class="block-icon">{html.escape(icon)}</div>
-            <div class="block-title-wrap">
-              <div class="block-kicker">Раздел интерфейса</div>
-              <div class="section-title">{html.escape(title)}</div>
-              <div class="section-sub">{html.escape(subtitle)}</div>
-            </div>
-          </div>
-          <div class="block-header-right">
-            <div class="block-sparkles" aria-hidden="true">✦ ✦ ✦</div>
-            {tooltip_html}
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_sidebar_card_header(title: str, icon: str = "📁", help_text: str = "") -> None:
-    tooltip_html = ""
-    if normalize_text(help_text):
-        tooltip_html = (
-            '<div class="sidebar-card-help-wrap">'
-            '<div class="sidebar-card-help">?</div>'
-            f'<div class="sidebar-card-tooltip">{html.escape(help_text)}</div>'
-            '</div>'
-        )
-    st.markdown(
-        f"""
-        <div class="sidebar-card-header">
-          <div class="sidebar-card-header-main">
-            <div class="sidebar-card-icon">{html.escape(icon)}</div>
-            <div class="sidebar-card-title-wrap">
-              <div class="sidebar-card-kicker">Быстрый доступ</div>
-              <div class="sidebar-card-title">{html.escape(title)}</div>
-            </div>
-          </div>
-          {tooltip_html}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_info_banner(title: str, text: str, icon: str = "💡", chips: Optional[list[str]] = None, tone: str = "blue") -> None:
-    chips_html = ""
-    if chips:
-        chips_html = "<div class='banner-chip-row'>" + "".join(
-            f"<span class='banner-chip'>{html.escape(chip)}</span>" for chip in chips if normalize_text(chip)
-        ) + "</div>"
-    st.markdown(
-        f"""
-        <div class="info-banner tone-{html.escape(tone)}">
-          <div class="info-banner-icon">{html.escape(icon)}</div>
-          <div class="info-banner-body">
-            <div class="info-banner-title">{html.escape(title)}</div>
-            <div class="info-banner-text">{html.escape(text)}</div>
-            {chips_html}
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_action_callout(title: str, text: str, icon: str = "🧭", badges: Optional[list[str]] = None) -> None:
-    badges_html = ""
-    if badges:
-        badges_html = "<div class='callout-badges'>" + "".join(
-            f"<span class='callout-badge'>{html.escape(badge)}</span>" for badge in badges if normalize_text(badge)
-        ) + "</div>"
-    st.markdown(
-        f"""
-        <div class="action-callout">
-          <div class="action-callout-icon">{html.escape(icon)}</div>
-          <div class="action-callout-body">
-            <div class="action-callout-title">{html.escape(title)}</div>
-            <div class="action-callout-text">{html.escape(text)}</div>
-            {badges_html}
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_report_summary_cards(report_df: pd.DataFrame, threshold_val: float, min_qty_val: float) -> None:
-    if report_df is None or report_df.empty:
-        return
-    max_diff = float(report_df["Разница, %"].max()) if "Разница, %" in report_df.columns else 0.0
-    avg_diff = float(report_df["Разница, %"].mean()) if "Разница, %" in report_df.columns else 0.0
-    unique_dists = sorted({normalize_text(x) for x in report_df.get("Лучший дистрибьютер", pd.Series(dtype=object)).tolist() if normalize_text(x)})
-    cards = [
-        ("📦", "Строк в отчёте", str(len(report_df)), "Сколько позиций прошли фильтр по выгоде и остатку"),
-        ("🎯", "Порог отбора", f"{fmt_qty(threshold_val)}%", "Минимальная выгода, которую вы задали для отчёта"),
-        ("🏷️", "Мин. остаток", f"{fmt_qty(min_qty_val)} шт.", "Отсекает единичные хвосты у дистрибьютеров"),
-        ("🚀", "Макс. выгода", f"{max_diff:.1f}%", "Самая сильная разница к вашей цене в текущем отчёте"),
-        ("📊", "Средняя выгода", f"{avg_diff:.1f}%", "Средний размер потенциального пересмотра по отчёту"),
-        ("🔗", "Чаще лучшие", ", ".join(unique_dists[:3]) if unique_dists else "—", "Какие дистрибьютеры чаще всего дают лучшую цену в текущей выборке"),
-    ]
-    cards_html = "".join(
-        f"<div class='summary-card'><div class='summary-card-top'><span class='summary-card-icon'>{icon}</span><span class='summary-card-label'>{label}</span></div><div class='summary-card-value'>{value}</div><div class='summary-card-note'>{note}</div></div>"
-        for icon, label, value, note in cards
-    )
-    st.markdown(f"<div class='summary-grid'>{cards_html}</div>", unsafe_allow_html=True)
 
 def render_results_table(df: pd.DataFrame, price_mode: str, round100: bool, custom_discount: float, distributor_map: Optional[dict[str, dict[str, Any]]] = None) -> None:
     selected_label = current_price_label(price_mode, custom_discount)
@@ -2716,12 +2254,10 @@ def render_results_table(df: pd.DataFrame, price_mode: str, round100: bool, cust
     <html><head><meta charset='utf-8'/>
     <style>
       body {{ margin:0; font-family: Inter, Arial, sans-serif; background: transparent; }}
-      .wrap {{ background:linear-gradient(180deg, #ffffff 0%, #fbfdff 100%); border:1px solid #dbe5f1; border-radius:22px; overflow:hidden; box-shadow: 0 10px 26px rgba(15,23,42,.06); }}
-      table {{ width:100%; border-collapse:separate; border-spacing:0; font-size:14px; }}
-      thead th {{ position: sticky; top: 0; z-index: 2; background:linear-gradient(180deg, #f4f8ff 0%, #eef3fb 100%); color:#334155; text-align:left; padding:15px 14px; font-weight:800; border-bottom:1px solid #d7e1ef; }}
-      tbody td {{ padding:14px; border-bottom:1px solid #e5edf6; vertical-align:top; color:#1e293b; background: rgba(255,255,255,.96); }}
-      tbody tr:nth-child(even) td {{ background: #fcfdff; }}
-      tbody tr:hover td {{ background: #f7faff; }}
+      .wrap {{ background:white; border:1px solid #dbe5f1; border-radius:18px; overflow:hidden; }}
+      table {{ width:100%; border-collapse:collapse; font-size:14px; }}
+      thead th {{ background:#eef3fb; color:#334155; text-align:left; padding:14px; font-weight:800; border-bottom:1px solid #d7e1ef; }}
+      tbody td {{ padding:14px; border-bottom:1px solid #e5edf6; vertical-align:top; color:#1e293b; }}
       tbody tr:last-child td {{ border-bottom:none; }}
       .article-pill {{ display:inline-block; padding:6px 10px; border-radius:999px; background:#edf2ff; color:#315efb; font-weight:800; }}
       .name-cell {{ font-weight:800; line-height:1.35; color:#1e293b; margin-bottom:6px; }}
@@ -2730,9 +2266,9 @@ def render_results_table(df: pd.DataFrame, price_mode: str, round100: bool, cust
       .match-badge-linked {{ background:#e8f1ff; color:#1d4ed8; }}
       .match-badge-similar {{ background:#fff0df; color:#c26a00; }}
       .sale-col {{ font-weight:800; }}
-      .selected-col {{ background: linear-gradient(180deg, #f4f8ff 0%, #eef4ff 100%); border-left:1px solid #c7d7ff; border-right:1px solid #c7d7ff; font-weight:900; color:#315efb; white-space:nowrap; box-shadow: inset 0 1px 0 rgba(255,255,255,.7); }}
+      .selected-col {{ background:#eef4ff; border-left:1px solid #c7d7ff; border-right:1px solid #c7d7ff; font-weight:900; color:#315efb; white-space:nowrap; }}
       .compare-col {{ min-width:220px; }}
-      .best-box {{ background:linear-gradient(180deg, #f8fbff 0%, #f3f8ff 100%); border:1px solid #d9e6ff; border-radius:18px; padding:11px 12px; min-width:190px; box-shadow: inset 0 1px 0 rgba(255,255,255,.8); }}
+      .best-box {{ background:#f8fbff; border:1px solid #d9e6ff; border-radius:16px; padding:10px 12px; min-width:190px; }}
       .best-box-empty {{ color:#64748b; font-weight:700; text-align:center; background:#f8fafc; border-color:#e2e8f0; }}
       .best-top {{ display:flex; justify-content:space-between; gap:8px; align-items:center; margin-bottom:6px; }}
       .dist-pill {{ display:inline-block; padding:5px 10px; border-radius:999px; background:#e9efff; color:#315efb; font-weight:800; }}
@@ -2742,7 +2278,7 @@ def render_results_table(df: pd.DataFrame, price_mode: str, round100: bool, cust
       .qty-low {{ color:#c2410c; font-weight:800; }}
       .qty-ok {{ color:#0f766e; font-weight:800; }}
       .best-delta {{ font-size:12px; color:#64748b; }}
-      .copy-btn {{ border:none; background:linear-gradient(180deg, #edf3ff 0%, #e3ecff 100%); color:#315efb; font-weight:800; border-radius:16px; padding:11px 14px; cursor:pointer; min-width:130px; box-shadow: inset 0 1px 0 rgba(255,255,255,.75); }}
+      .copy-btn {{ border:none; background:#e9efff; color:#315efb; font-weight:800; border-radius:14px; padding:11px 14px; cursor:pointer; min-width:130px; }}
     </style></head><body>
       <div class='wrap'><table>
         <thead><tr><th>Артикул</th><th>Название</th><th>Производитель</th><th>Свободно</th><th>Всего</th><th>Цена продажи</th><th>{html.escape(selected_label)}</th><th>Где лучше нас</th><th>Действие</th></tr></thead>
@@ -2779,6 +2315,11 @@ st.markdown(
     .sidebar-brand-logo { width:44px; height:44px; border-radius:14px; background: linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.08)); display:flex; align-items:center; justify-content:center; box-shadow: inset 0 1px 0 rgba(255,255,255,.15); font-size:22px; }
     .sidebar-brand-title { font-size: 1.22rem; font-weight: 900; line-height:1.05; color:#ffffff !important; }
     .sidebar-brand-sub { font-size: .82rem; color: #c7d6ff !important; margin-top: 4px; }
+    .sidebar-card { background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.04)); border: 1px solid rgba(255,255,255,.12); border-radius: 20px; padding: 1rem 0.95rem 0.95rem 0.95rem; margin: 0.95rem 0 1.05rem 0; box-shadow: 0 10px 22px rgba(2, 8, 23, .22), inset 0 1px 0 rgba(255,255,255,.05); }
+    .sidebar-card-title { font-size: 1.02rem; font-weight: 900; color:#ffffff !important; margin-bottom: .45rem; }
+    .sidebar-card-note { font-size: .78rem; line-height: 1.45; color:#c7d6ff !important; margin-bottom: .6rem; }
+    .sidebar-status { background: rgba(7, 31, 74, .9); border: 1px solid rgba(255,255,255,.06); border-radius: 14px; padding: .72rem .78rem; color:#ffffff !important; font-weight: 800; margin-top: .55rem; }
+    .sidebar-mini { font-size:.78rem; color:#c7d6ff !important; line-height:1.45; margin-top:.65rem; }
     [data-testid="stSidebar"] .stFileUploader section { background: rgba(255,255,255,0.03) !important; border: 1px dashed rgba(255,255,255,0.22) !important; border-radius: 16px !important; padding: 0.6rem !important; }
     [data-testid="stSidebar"] .stFileUploader button, [data-testid="stSidebar"] .stFileUploader button[kind], [data-testid="stSidebar"] .stFileUploader [data-testid="stFileUploaderDropzone"] button, [data-testid="stSidebar"] .stFileUploader [data-testid="baseButton-secondary"], [data-testid="stSidebar"] .stFileUploader [data-baseweb="button"] { background: linear-gradient(180deg, #3767ff 0%, #2455ef 100%) !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; border: none !important; border-radius: 14px !important; font-weight: 800 !important; opacity: 1 !important; box-shadow: 0 10px 20px rgba(49, 94, 251, 0.30) !important; }
     [data-testid="stSidebar"] .stFileUploader small, [data-testid="stSidebar"] .stFileUploader span, [data-testid="stSidebar"] .stFileUploader label { color: #dbe6ff !important; -webkit-text-fill-color: #dbe6ff !important; opacity: 1 !important; }
@@ -2791,137 +2332,19 @@ st.markdown(
     [data-testid="stSidebar"] .stNumberInput button, [data-testid="stSidebar"] .stNumberInput [data-baseweb="button"], [data-testid="stSidebar"] .stNumberInput button svg, [data-testid="stSidebar"] .stNumberInput [data-baseweb="button"] svg { background: #edf3ff !important; color: #1d4ed8 !important; fill: #1d4ed8 !important; stroke: #1d4ed8 !important; border-color: #d9e4ff !important; opacity: 1 !important; }
     [data-testid="stSidebar"] .stRadio > label, [data-testid="stSidebar"] .stSelectbox > label, [data-testid="stSidebar"] .stCheckbox > label, [data-testid="stSidebar"] .stNumberInput > label, [data-testid="stSidebar"] .stTextArea > label, [data-testid="stSidebar"] .stFileUploader > label { color:#ffffff !important; font-weight: 800 !important; font-size: .92rem !important; }
     [data-testid="stSidebar"] .stCheckbox p, [data-testid="stSidebar"] .stRadio p { color:#eef3ff !important; }
-    .topbar { position: relative; background: linear-gradient(110deg, #0f172a 0%, #1742a8 56%, #2d6bff 100%); color: white; padding: 18px 20px; border-radius: 24px; margin-top: 0.55rem; margin-bottom: 14px; box-shadow: 0 18px 38px rgba(15, 23, 42, .22); overflow: hidden; }
-    .topbar::before { content: ''; position: absolute; inset: -30% auto auto -5%; width: 280px; height: 280px; border-radius: 999px; background: radial-gradient(circle, rgba(255,255,255,.18) 0%, rgba(255,255,255,0) 70%); pointer-events:none; }
-    .topbar::after { content: ''; position: absolute; inset: auto -90px -120px auto; width: 240px; height: 240px; border-radius: 999px; background: radial-gradient(circle, rgba(255,255,255,.14) 0%, rgba(255,255,255,0) 72%); pointer-events:none; }
-    .topbar-grid { display:grid; grid-template-columns: 1.6fr 1fr 1fr 1fr; gap: 12px; align-items:center; position:relative; z-index:1; }
-    .brand-box { display:flex; gap:14px; align-items:center; }
-    .logo { width:58px;height:58px;border-radius:18px;background:rgba(255,255,255,.16); display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:700; box-shadow: inset 0 1px 0 rgba(255,255,255,.25), 0 10px 24px rgba(15,23,42,.16); }
-    .brand-title { font-size: 25px; font-weight: 900; line-height: 1; letter-spacing: -.02em; }
-    .brand-sub { font-size: 13px; opacity: .92; margin-top: 6px; }
-    .stat-box { background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.14); border-radius: 18px; padding: 12px 13px; min-height: 76px; backdrop-filter: blur(3px); }
-    .stat-cap { font-size: 12px; opacity: .82; margin-bottom: 6px; }
-    .stat-val { font-size: 16px; font-weight: 800; line-height: 1.3; }
-    .toolbar, .result-wrap { position: relative; background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%); border: 1px solid #dbe5f1; border-radius: 22px; padding: 16px 18px 18px 18px; margin-bottom: 14px; box-shadow: 0 10px 26px rgba(15, 23, 42, .06); overflow: hidden; transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
-    .toolbar:hover, .result-wrap:hover { transform: translateY(-1px); box-shadow: 0 14px 30px rgba(15, 23, 42, .08); border-color: #cfe0ff; }
-    .toolbar::before, .result-wrap::before { content: ''; position: absolute; inset: 0 auto auto 0; width: 100%; height: 4px; background: linear-gradient(90deg, #315efb 0%, #79a6ff 100%); opacity: .95; }
-    .toolbar::after, .result-wrap::after { content: ''; position: absolute; right: -65px; top: -65px; width: 180px; height: 180px; border-radius: 999px; background: radial-gradient(circle, rgba(49,94,251,.08) 0%, rgba(49,94,251,0) 72%); pointer-events:none; }
-    .block-header { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding: 2px 0 14px 0; margin-bottom: 14px; border-bottom: 1px solid #e7eef9; position: relative; }
-    .block-header-main { display:flex; align-items:flex-start; gap:14px; min-width: 0; }
-    .block-header-right { display:flex; align-items:flex-start; gap:10px; flex: 0 0 auto; }
-    .block-icon { width: 48px; height: 48px; border-radius: 16px; background: linear-gradient(180deg, #3767ff 0%, #2455ef 100%); color: #ffffff; display:flex; align-items:center; justify-content:center; font-size: 24px; flex: 0 0 48px; box-shadow: 0 12px 22px rgba(49, 94, 251, .22); position: relative; }
-    .block-icon::after { content: ''; position: absolute; inset: auto -4px -5px auto; width: 16px; height: 16px; border-radius: 999px; background: rgba(255,255,255,.25); }
-    .block-title-wrap { min-width: 0; }
-    .block-kicker { display:inline-flex; align-items:center; padding: 4px 9px; margin-bottom: 7px; border-radius: 999px; background: #eef4ff; border: 1px solid #d8e5ff; color: #315efb; font-size: 11px; font-weight: 900; letter-spacing: .04em; text-transform: uppercase; }
-    .toolbar-title, .section-title { font-size: 22px; font-weight: 900; color:#0f172a; margin:0 0 5px 0; line-height:1.12; letter-spacing:-0.02em; }
-    .toolbar-sub, .section-sub { font-size: 13px; color:#64748b; margin:0; line-height:1.55; max-width: 980px; }
-    .block-sparkles { display:flex; align-items:center; gap: 3px; color:#89a9ff; font-size: 12px; font-weight: 900; letter-spacing: .04em; opacity: .9; margin-top: 5px; }
-    .block-help-wrap { position: relative; flex: 0 0 auto; }
-    .block-help { display:flex; align-items:center; justify-content:center; width: 32px; height: 32px; border-radius: 999px; border: 1px solid #cfe0ff; background: linear-gradient(180deg, #f6f9ff 0%, #eef4ff 100%); color: #315efb; font-size: 15px; font-weight: 900; cursor: help; user-select: none; box-shadow: inset 0 1px 0 rgba(255,255,255,.8), 0 6px 14px rgba(49,94,251,.08); }
-    .block-help:hover { background: #eaf1ff; transform: translateY(-1px); }
-    .block-tooltip { position: absolute; right: 0; top: 40px; width: 340px; max-width: min(340px, 82vw); padding: 13px 14px; border-radius: 16px; background: #0f172a; color: #f8fbff; font-size: 12.8px; line-height: 1.5; box-shadow: 0 18px 36px rgba(15, 23, 42, .28); opacity: 0; transform: translateY(6px); pointer-events: none; transition: opacity .18s ease, transform .18s ease; z-index: 20; }
-    .block-tooltip::before { content: ''; position: absolute; top: -6px; right: 10px; width: 12px; height: 12px; background: #0f172a; transform: rotate(45deg); }
-    .block-help-wrap:hover .block-tooltip { opacity: 1; transform: translateY(0); }
-    .sidebar-card { background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.045)); border: 1px solid rgba(255,255,255,.13); border-radius: 22px; padding: 1rem 0.95rem 0.95rem 0.95rem; margin: 0.95rem 0 1.05rem 0; box-shadow: 0 12px 26px rgba(2, 8, 23, .24), inset 0 1px 0 rgba(255,255,255,.06); position: relative; overflow: hidden; }
-    .sidebar-card::before { content: ''; position: absolute; inset: 0 auto auto 0; width: 100%; height: 3px; background: linear-gradient(90deg, rgba(111,163,255,.95) 0%, rgba(49,94,251,.95) 100%); opacity: .95; }
-    .sidebar-card-header { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom: .6rem; padding-bottom: .55rem; border-bottom: 1px solid rgba(255,255,255,.10); }
-    .sidebar-card-header-main { display:flex; align-items:center; gap:10px; min-width:0; }
-    .sidebar-card-title-wrap { min-width: 0; }
-    .sidebar-card-kicker { color:#cfe0ff !important; font-size:10px; text-transform: uppercase; letter-spacing:.06em; font-weight:900; margin-bottom:2px; }
-    .sidebar-card-icon { width:34px; height:34px; border-radius:12px; background: linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.08)); display:flex; align-items:center; justify-content:center; font-size:17px; box-shadow: inset 0 1px 0 rgba(255,255,255,.12); flex: 0 0 34px; }
-    .sidebar-card-title { font-size: 1.01rem; font-weight: 900; color:#ffffff !important; line-height:1.15; margin:0; }
-    .sidebar-card-help-wrap { position: relative; flex: 0 0 auto; }
-    .sidebar-card-help { display:flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:999px; border:1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.08); color:#ffffff !important; font-size:12px; font-weight:900; cursor:help; user-select:none; }
-    .sidebar-card-tooltip { position:absolute; right:0; top:30px; width:250px; max-width:min(250px, 66vw); padding:10px 11px; border-radius:12px; background:#f8fbff; color:#0f172a !important; font-size:12px; line-height:1.45; box-shadow:0 16px 34px rgba(2, 8, 23, .30); opacity:0; transform:translateY(6px); pointer-events:none; transition:opacity .18s ease, transform .18s ease; z-index:35; }
-    .sidebar-card-tooltip::before { content:''; position:absolute; top:-6px; right:9px; width:12px; height:12px; background:#f8fbff; transform:rotate(45deg); }
-    .sidebar-card-help-wrap:hover .sidebar-card-tooltip { opacity:1; transform:translateY(0); }
-    .sidebar-card-note { font-size: .79rem; line-height: 1.52; color:#c7d6ff !important; margin-bottom: .65rem; }
-    .sidebar-status { background: rgba(7, 31, 74, .92); border: 1px solid rgba(255,255,255,.06); border-radius: 14px; padding: .76rem .82rem; color:#ffffff !important; font-weight: 800; margin-top: .58rem; }
-    .sidebar-mini { font-size:.78rem; color:#c7d6ff !important; line-height:1.5; margin-top:.65rem; }
-    .stButton > button, .stDownloadButton > button { min-height: 48px !important; border-radius: 16px !important; font-weight: 900 !important; border: none !important; box-shadow: 0 10px 18px rgba(49,94,251,.12) !important; transition: transform .16s ease, box-shadow .16s ease, filter .16s ease !important; }
-    .stButton > button:hover, .stDownloadButton > button:hover { transform: translateY(-1px); box-shadow: 0 14px 24px rgba(49,94,251,.16) !important; filter: saturate(1.02); }
-    .stButton > button:focus, .stDownloadButton > button:focus { box-shadow: 0 0 0 3px rgba(49,94,251,.12), 0 12px 22px rgba(49,94,251,.16) !important; }
-    div[data-testid="metric-container"] { background: linear-gradient(180deg, #ffffff 0%, #f9fbff 100%); border: 1px solid #dbe7fb; border-radius: 18px; padding: 10px 12px; box-shadow: inset 0 1px 0 rgba(255,255,255,.7); }
-    div[data-testid="metric-container"] > label { color:#64748b !important; font-weight:700 !important; }
-    div[data-testid="metric-container"] [data-testid="stMetricValue"] { color:#0f172a !important; font-weight:900 !important; }
-    [data-testid="stExpander"] { border: 1px solid #dbe5f1; border-radius: 16px; overflow: hidden; background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%); }
-    [data-testid="stExpander"] details summary { background: #f8fbff; border-bottom: 1px solid #e6eefb; }
-    [data-testid="stDataFrame"] { border: 1px solid #dbe5f1; border-radius: 18px; overflow: hidden; box-shadow: 0 6px 18px rgba(15,23,42,.05); }
-    [data-testid="stForm"] { background: linear-gradient(180deg, rgba(255,255,255,.35), rgba(255,255,255,.1)); border-radius: 18px; }
-    .mini-chip { display:inline-flex; align-items:center; gap:6px; padding:7px 11px; border-radius:999px; background:#eef4ff; color:#315efb; font-weight:800; font-size:12px; margin-right:6px; margin-bottom:6px; border: 1px solid #d6e3ff; }
-    .soft-note { margin: 8px 0 12px 0; padding: 11px 14px; border-radius: 16px; background: linear-gradient(180deg, #f7fbff 0%, #eef5ff 100%); border: 1px solid #d6e4ff; color: #44607f; font-size: 13px; line-height: 1.55; }
-    .result-inline-stat { display:inline-flex; align-items:center; gap:8px; margin: 2px 0 14px 0; padding: 9px 13px; border-radius: 999px; background:#eefaf1; color:#166534; border:1px solid #cbead4; font-weight:800; }
-    .insight-grid { display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0 16px 0; }
-    .insight-card { background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%); border: 1px solid #dbe7fb; border-radius: 20px; padding: 14px 15px; box-shadow: 0 8px 18px rgba(15,23,42,.05); }
-    .insight-top { display:flex; align-items:center; gap:8px; margin-bottom: 10px; }
-    .insight-icon { width:32px; height:32px; display:flex; align-items:center; justify-content:center; border-radius: 12px; background:#eef4ff; font-size:16px; }
-    .insight-label { color:#64748b; font-size:12px; font-weight:800; }
-    .insight-value { color:#0f172a; font-size: 28px; font-weight: 900; line-height:1.1; margin-bottom: 6px; }
-    .insight-note { color:#6b7c93; font-size:12px; line-height:1.45; }
-    .all-prices-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin: 14px 0 10px 0; padding: 14px 16px; border-radius: 18px; background: linear-gradient(180deg, #fbfdff 0%, #f5f9ff 100%); border:1px solid #dbe7fb; }
-    .all-prices-article { color:#315efb; font-size: 18px; font-weight: 900; margin-bottom: 4px; }
-    .all-prices-name { color:#0f172a; font-size: 14px; font-weight: 800; line-height: 1.45; }
-    .all-prices-own { margin-top: 6px; color:#64748b; font-size: 12.5px; }
-    .offers-grid { display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0 0 14px 0; }
-    .offer-card { border-radius: 18px; padding: 14px; border:1px solid #dbe7fb; background: linear-gradient(180deg, #ffffff 0%, #f9fbff 100%); box-shadow: 0 8px 18px rgba(15,23,42,.05); min-height: 172px; }
-    .offer-card-top { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom: 10px; }
-    .offer-source { color:#0f172a; font-size: 15px; font-weight: 900; }
-    .offer-status { display:inline-flex; align-items:center; justify-content:center; padding:5px 9px; border-radius:999px; font-size:11px; font-weight:900; }
-    .offer-good .offer-status { background:#e9f9ef; color:#15803d; }
-    .offer-bad .offer-status { background:#fff1f2; color:#be123c; }
-    .offer-neutral .offer-status { background:#eef4ff; color:#315efb; }
-    .offer-own .offer-status { background:#f3f4f6; color:#475569; }
-    .offer-muted .offer-status { background:#f8fafc; color:#64748b; }
-    .offer-price { color:#0f2f83; font-size: 24px; font-weight: 900; line-height: 1.15; margin-bottom: 6px; }
-    .offer-meta { color:#64748b; font-size: 12.5px; line-height:1.45; margin-bottom: 4px; }
-    .offer-code { color:#315efb; font-size:12px; font-weight:800; margin-top: 8px; }
-    .offer-name { color:#334155; font-size:12px; line-height:1.45; margin-top:4px; }
-    @media (max-width: 1100px) {
-        .insight-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .offers-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    }
-    @media (max-width: 700px) {
-        .insight-grid, .offers-grid { grid-template-columns: 1fr; }
-    }
-    .info-banner { display:flex; gap:14px; align-items:flex-start; padding:15px 16px; margin: 6px 0 14px 0; border-radius: 18px; border: 1px solid #dbe7fb; background: linear-gradient(180deg, #fbfdff 0%, #f5f9ff 100%); box-shadow: 0 8px 18px rgba(15,23,42,.05); }
-    .info-banner-icon { width:42px; height:42px; flex:0 0 42px; border-radius: 14px; display:flex; align-items:center; justify-content:center; font-size: 20px; background: linear-gradient(180deg, #3767ff 0%, #2455ef 100%); color:#fff; box-shadow: 0 10px 18px rgba(49,94,251,.18); }
-    .info-banner-body { min-width: 0; }
-    .info-banner-title { font-size: 15px; font-weight: 900; color:#0f172a; margin-bottom: 4px; }
-    .info-banner-text { font-size: 13px; line-height: 1.55; color:#64748b; }
-    .banner-chip-row { display:flex; flex-wrap:wrap; gap:8px; margin-top: 10px; }
-    .banner-chip { display:inline-flex; align-items:center; gap:6px; padding: 6px 10px; border-radius: 999px; background:#eef4ff; border:1px solid #d8e5ff; color:#315efb; font-size: 12px; font-weight: 800; }
-    .tone-green { background: linear-gradient(180deg, #fbfffd 0%, #f2fff7 100%); border-color: #d2f1dd; }
-    .tone-green .info-banner-icon { background: linear-gradient(180deg, #16a34a 0%, #15803d 100%); box-shadow: 0 10px 18px rgba(22,163,74,.18); }
-    .tone-purple { background: linear-gradient(180deg, #fcfbff 0%, #f6f3ff 100%); border-color: #e6dcff; }
-    .tone-purple .info-banner-icon { background: linear-gradient(180deg, #7c3aed 0%, #6d28d9 100%); box-shadow: 0 10px 18px rgba(124,58,237,.18); }
-    .action-callout { display:flex; gap:14px; align-items:flex-start; padding:16px 17px; margin: 12px 0 10px 0; border-radius: 20px; background: linear-gradient(135deg, #0f172a 0%, #1d4ed8 100%); color:#ffffff; box-shadow: 0 18px 34px rgba(29,78,216,.18); position: relative; overflow:hidden; }
-    .action-callout::after { content:'✦'; position:absolute; right:16px; top:8px; font-size:42px; color: rgba(255,255,255,.08); transform: rotate(12deg); }
-    .action-callout-icon { width:46px; height:46px; flex:0 0 46px; border-radius: 15px; background: rgba(255,255,255,.16); display:flex; align-items:center; justify-content:center; font-size: 22px; }
-    .action-callout-title { font-size: 15px; font-weight: 900; margin-bottom: 4px; }
-    .action-callout-text { font-size: 13px; line-height:1.55; color: rgba(255,255,255,.9); }
-    .callout-badges { display:flex; flex-wrap:wrap; gap:8px; margin-top: 10px; }
-    .callout-badge { display:inline-flex; align-items:center; padding: 6px 10px; border-radius:999px; background: rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.14); font-size:12px; font-weight:800; color:#fff; }
-    .summary-grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 12px 0 14px 0; }
-    .summary-card { background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%); border:1px solid #dbe7fb; border-radius: 18px; padding: 14px 15px; box-shadow: 0 8px 18px rgba(15,23,42,.05); }
-    .summary-card-top { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
-    .summary-card-icon { width:32px; height:32px; border-radius:12px; display:flex; align-items:center; justify-content:center; background:#eef4ff; font-size:16px; }
-    .summary-card-label { color:#64748b; font-size:12px; font-weight:800; }
-    .summary-card-value { color:#0f172a; font-size: 24px; font-weight:900; line-height:1.15; margin-bottom: 6px; }
-    .summary-card-note { color:#6b7c93; font-size:12px; line-height:1.45; }
-    div[data-testid="stExpander"] details { border:1px solid #dbe7fb; border-radius: 18px; background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%); overflow:hidden; box-shadow: 0 8px 18px rgba(15,23,42,.04); }
-    div[data-testid="stExpander"] summary { padding-top: 4px; padding-bottom: 4px; }
-    div[data-testid="stDataFrame"] { border-radius: 18px; overflow:hidden; border: 1px solid #e2e8f0; box-shadow: 0 8px 18px rgba(15,23,42,.04); }
-    .analysis-help-grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 10px 0 14px 0; }
-    .analysis-help-card { border-radius: 16px; border:1px solid #dbe7fb; background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%); padding: 12px 13px; }
-    .analysis-help-title { font-size: 13px; font-weight: 900; color:#0f172a; margin-bottom: 5px; }
-    .analysis-help-text { font-size: 12px; line-height:1.5; color:#64748b; }
-    @media (max-width: 1100px) {
-        .summary-grid, .analysis-help-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    }
-    @media (max-width: 700px) {
-        .summary-grid, .analysis-help-grid { grid-template-columns: 1fr; }
-        .info-banner, .action-callout { padding: 14px; }
-    }
+    .topbar { background: linear-gradient(90deg, #0f172a 0%, #1d4ed8 100%); color: white; padding: 16px 18px; border-radius: 18px; margin-top: 0.4rem; margin-bottom: 10px; box-shadow: 0 12px 28px rgba(15, 23, 42, .18); }
+    .topbar-grid { display:grid; grid-template-columns: 1.6fr 1fr 1fr 1fr; gap: 10px; align-items:center; }
+    .brand-box { display:flex; gap:12px; align-items:center; }
+    .logo { width:54px;height:54px;border-radius:14px;background:rgba(255,255,255,.14); display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:700; }
+    .brand-title { font-size: 24px; font-weight: 900; line-height: 1; }
+    .brand-sub { font-size: 13px; opacity: .9; margin-top: 5px; }
+    .stat-box { background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.12); border-radius: 14px; padding: 10px 12px; min-height: 70px; }
+    .stat-cap { font-size: 12px; opacity: .82; margin-bottom: 4px; }
+    .stat-val { font-size: 16px; font-weight: 800; }
+    .toolbar, .result-wrap { background: white; border: 1px solid #dbe5f1; border-radius: 16px; padding: 12px 14px; margin-bottom: 10px; box-shadow: 0 6px 18px rgba(15, 23, 42, .05); }
+    .toolbar-title, .section-title { font-size: 18px; font-weight: 900; color:#0f172a; margin-bottom:4px; }
+    .toolbar-sub, .section-sub { font-size: 12px; color:#64748b; margin-bottom:10px; }
+    .mini-chip { display:inline-block; padding:6px 10px; border-radius:999px; background:#eef4ff; color:#315efb; font-weight:800; font-size:12px; margin-right:6px; margin-bottom:6px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -2946,13 +2369,12 @@ with st.sidebar:
     )
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    render_sidebar_card_header("Загрузить прайс", "📥", "Основной прайс каталога. Из него приложение берёт артикул, название, остаток и цену продажи.")
+    st.markdown('<div class="sidebar-card-title">Загрузить прайс</div>', unsafe_allow_html=True)
     uploaded = st.file_uploader("Загрузить прайс", type=["xlsx", "xls", "xlsm", "csv"], label_visibility="collapsed")
     if uploaded is not None:
         try:
-            st.session_state.catalog_base_df = load_price_file(uploaded.name, uploaded.getvalue())
+            st.session_state.catalog_df = load_price_file(uploaded.name, uploaded.getvalue())
             st.session_state.catalog_name = uploaded.name
-            rebuild_catalog_effective_df()
         except Exception as exc:
             st.error(f"Ошибка: {exc}")
     file_caption = st.session_state.get("catalog_name", "Файл ещё не выбран")
@@ -2960,25 +2382,7 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    render_sidebar_card_header("Справочник артикулов", "🧠", "Дополнительный словарь коротких и длинных артикулов. Используется в самом конце, если обычного поиска и кодов из названия недостаточно.")
-    st.markdown('<div class="sidebar-card-note">Необязательный файл. Используется в самом конце как словарь соответствий между короткими и длинными артикулами.</div>', unsafe_allow_html=True)
-    article_ref_uploaded = st.file_uploader("Загрузить справочник артикулов", type=["xlsx", "xls", "xlsm", "csv"], key="article_ref_uploader", label_visibility="collapsed")
-    if article_ref_uploaded is not None:
-        try:
-            st.session_state.article_ref_df = load_article_reference_file(article_ref_uploaded.name, article_ref_uploaded.getvalue())
-            st.session_state.article_ref_name = article_ref_uploaded.name
-            rebuild_catalog_effective_df()
-            submitted_query = normalize_text(st.session_state.get("submitted_query", ""))
-            if submitted_query and isinstance(st.session_state.catalog_df, pd.DataFrame):
-                st.session_state.last_result = perform_search(st.session_state.catalog_df, submitted_query, st.session_state.get("search_mode", "Только артикул"))
-        except Exception as exc:
-            st.error(f"Ошибка справочника: {exc}")
-    article_ref_caption = st.session_state.get("article_ref_name", "ещё не загружен")
-    st.markdown(f'<div class="sidebar-status">Справочник: {html.escape(article_ref_caption)}</div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    render_sidebar_card_header("Загрузить файл Авито", "🛒", "Файл с объявлениями Авито. Помогает быстро понять, есть ли у найденной позиции действующее объявление и открыть его.")
+    st.markdown('<div class="sidebar-card-title">Загрузить файл Авито</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-card-note">Файл с колонкой <b>Название объявления</b>. Ссылки можно читать прямо из гиперссылок Excel.</div>', unsafe_allow_html=True)
     avito_uploaded = st.file_uploader("Загрузить файл Авито", type=["xlsx", "xlsm", "csv"], key="avito_uploader", label_visibility="collapsed")
     if avito_uploaded is not None:
@@ -2992,7 +2396,7 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    render_sidebar_card_header("Дистрибьютеры", "🏷️", "Здесь подключаются прайсы Ресурс, OCS и Мерлион. Блок сравнивает только нормальные оригинальные позиции и только то, что есть в наличии.")
+    st.markdown('<div class="sidebar-card-title">Дистрибьютеры</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-card-note">Добавлен перенос логики сравнения цен: только оригиналы, только хорошие позиции, только товар в наличии.</div>', unsafe_allow_html=True)
     resource_uploaded = st.file_uploader("Ресурс", type=["xlsx", "xlsm"], key="resource_uploader")
     if resource_uploaded is not None:
@@ -3026,7 +2430,7 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    render_sidebar_card_header("Быстрая правка цен", "✏️", "Локально обновляет цены в загруженном прайсе по вставленному списку артикулов и новых цен. Удобно для быстрых правок без изменения исходного файла.")
+    st.markdown('<div class="sidebar-card-title">Быстрая правка цен</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-card-note">Вставьте строки вида <b>CE278A 8900</b>, <b>CF364A - 29700</b> или прямо текст из Telegram.</div>', unsafe_allow_html=True)
     st.text_area(
         "Вставьте строки вроде: CE278A 8900",
@@ -3038,14 +2442,13 @@ CE278AC 7900
 CF364A - 29700 🔽""",
     )
     if st.button("Править цены в прайсе", use_container_width=True):
-        if isinstance(st.session_state.catalog_base_df, pd.DataFrame):
-            updated_base_df, patch_message = apply_price_updates(st.session_state.catalog_base_df, st.session_state.price_patch_input)
-            st.session_state.catalog_base_df = updated_base_df
-            rebuild_catalog_effective_df()
+        if isinstance(st.session_state.catalog_df, pd.DataFrame):
+            updated_df, patch_message = apply_price_updates(st.session_state.catalog_df, st.session_state.price_patch_input)
+            st.session_state.catalog_df = updated_df
             st.session_state.patch_message = patch_message
             submitted_query = normalize_text(st.session_state.get("submitted_query", ""))
-            if submitted_query and isinstance(st.session_state.catalog_df, pd.DataFrame):
-                st.session_state.last_result = perform_search(st.session_state.catalog_df, submitted_query, st.session_state.get("search_mode", "Только артикул"))
+            if submitted_query:
+                st.session_state.last_result = perform_search(updated_df, submitted_query, st.session_state.get("search_mode", "Только артикул"))
         else:
             st.session_state.patch_message = "Сначала загрузите прайс."
     if st.session_state.patch_message:
@@ -3055,7 +2458,7 @@ CF364A - 29700 🔽""",
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    render_sidebar_card_header("Настройки", "⚙️", "Управляет режимом поиска, основной ценой, пользовательской скидкой и округлением. На ядро поиска не влияет, только на отображение и шаблоны.")
+    st.markdown('<div class="sidebar-card-title">⚙️ Настройки</div>', unsafe_allow_html=True)
     st.selectbox("Режим поиска", ["Только артикул", "Умный", "Артикул + название + бренд"], key="search_mode")
     st.radio("Какая цена главная", ["-12%", "-20%", "Своя скидка"], key="price_mode")
     st.number_input("Своя скидка, %", min_value=0.0, max_value=99.0, step=1.0, key="custom_discount")
@@ -3063,7 +2466,7 @@ CF364A - 29700 🔽""",
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    render_sidebar_card_header("Текст шаблона 1", "🧾", "Постоянный хвост для первого шаблона. Здесь можно хранить адрес, условия работы и доставку — они подставляются автоматически в конец шаблона.")
+    st.markdown('<div class="sidebar-card-title">Текст шаблона 1</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-card-note">Этот текст добавляется один раз в конце шаблона 1. Хэштеги по артикулам подставляются автоматически.</div>', unsafe_allow_html=True)
     st.text_area("Текст шаблона 1", key="template1_footer", height=170, label_visibility="collapsed")
     st.markdown('<div class="sidebar-mini">Текст сохраняется локально и останется до следующего изменения.</div>', unsafe_allow_html=True)
@@ -3096,12 +2499,7 @@ st.markdown(f"""
 # Поиск
 # ------
 st.markdown('<div class="toolbar">', unsafe_allow_html=True)
-render_block_header(
-    "Поиск товара",
-    "Можно искать по одному или нескольким артикулам. Пробелы, /, запятые и Enter тоже поддерживаются.",
-    icon="🔎",
-    help_text="Основной блок поиска по вашему прайсу. Сначала ищет точное совпадение по артикулу, затем связанные коды из названия и только потом — более мягкие варианты, если они разрешены режимом поиска.",
-)
+st.markdown('<div class="toolbar-title">Поиск товара</div><div class="toolbar-sub">Можно искать по одному или нескольким артикулам. Пробелы, /, запятые и Enter тоже поддерживаются.</div>', unsafe_allow_html=True)
 
 with st.form("search_form", clear_on_submit=False):
     search_value = st.text_area(
@@ -3140,12 +2538,7 @@ min_dist_qty = float(st.session_state.distributor_min_qty)
 # Результаты
 # ----------
 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-render_block_header(
-    "Результаты",
-    "Точное совпадение — по колонке «Артикул». Найдено по названию — когда код сидит в названии той же позиции.",
-    icon="📊",
-    help_text="Здесь показываются найденные позиции из вашего прайса. Если подключены дистрибьютеры, рядом появляется блок «Где лучше нас» с лучшей более дешёвой ценой поставщика, остатком и выгодой.",
-)
+st.markdown('<div class="section-title">Результаты</div><div class="section-sub">Точное совпадение — по колонке «Артикул». Найдено по названию — когда код сидит в названии той же позиции.</div>', unsafe_allow_html=True)
 
 if current_df is None:
     st.info("Сначала загрузите прайс в левой панели 👈")
@@ -3161,15 +2554,7 @@ else:
     m4.metric("Каталог", len(current_df))
 
     compare_map = distributor_compare_map(result_df, search_mode, min_qty=min_dist_qty) if distributor_sources_ready() else {}
-    render_results_insight_dashboard(result_df, compare_map)
     if compare_map:
-        render_info_banner(
-            "Как читать результаты сравнения",
-            "В таблице выше показывается только поставщик, который реально дешевле вас. Если блок пустой, это не всегда означает, что совпадений нет — часто это значит, что поставщики нашлись, но просто дороже вашей цены.",
-            icon="🧠",
-            chips=["пустой блок ≠ нет совпадения", "остаток уже учтён", "плохие предложения отсеяны"],
-            tone="green",
-        )
         better_rows = sum(1 for item in compare_map.values() if item.get("best_offer"))
         chips = []
         if st.session_state.get("resource_df") is not None:
@@ -3184,21 +2569,7 @@ else:
 
     render_results_table(result_df.head(200), price_mode, round100, custom_discount, distributor_map=compare_map)
     with st.expander("Показать техническую таблицу"):
-        render_info_banner(
-            "Техническая таблица для проверки логики",
-            "Этот блок нужен для разбора спорных кейсов. Здесь видно, какие алиасы использовались, что нашли Ресурс, OCS и Мерлион, и почему поставщик был лучше, дороже или отфильтрован.",
-            icon="🧪",
-            chips=["debug по источникам", "алиасы артикула", "лучший дистрибьютер и остаток"],
-            tone="purple",
-        )
-        st.markdown("""
-        <div class='analysis-help-grid'>
-          <div class='analysis-help-card'><div class='analysis-help-title'>🔎 Что смотреть первым</div><div class='analysis-help-text'>Проверь артикул, алиасы и колонку лучшего дистрибьютора. Это быстро покажет, нашёлся ли товар и есть ли цена лучше вашей.</div></div>
-          <div class='analysis-help-card'><div class='analysis-help-title'>🧱 Debug по источникам</div><div class='analysis-help-text'>Колонки debug показывают, был ли найден товар у каждого поставщика, дороже он или лучше вас, и какой код реально сработал.</div></div>
-          <div class='analysis-help-card'><div class='analysis-help-title'>🛡️ Для чего это</div><div class='analysis-help-text'>Если результат выглядит странно, именно тут проще всего понять: проблема в артикулах, фильтре качества, остатке или просто в цене.</div></div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.dataframe(build_display_df(result_df, price_mode, round100, custom_discount, search_mode=search_mode, min_qty=min_dist_qty), use_container_width=True, hide_index=True, height=360)
+        st.dataframe(build_display_df(result_df, price_mode, round100, custom_discount, search_mode=search_mode, min_qty=min_dist_qty), use_container_width=True, hide_index=True, height=320)
     st.download_button(
         "⬇️ Скачать найденное в Excel",
         to_excel_bytes(result_df, price_mode, round100, custom_discount, search_mode=search_mode, min_qty=min_dist_qty),
@@ -3208,12 +2579,6 @@ else:
     if distributor_sources_ready():
         with st.expander("Показать цены у всех"):
             render_all_distributor_prices_block(result_df, search_mode, min_dist_qty, price_mode, round100, custom_discount)
-        render_action_callout(
-            "Файл для согласования с руководителем",
-            "Этот экспорт собирает базовую аналитику по найденным товарам: ваш текущий прод, лучшую цену поставщика и поля, которые удобно дозаполнить вручную перед обсуждением новых цен.",
-            icon="🗂️",
-            badges=["артикул и количество уже заполнены", "лучшая цена дистрибьютора уже внутри", "готово для обсуждения"],
-        )
         st.download_button(
             "⬇️ Скачать анализ товара",
             build_product_analysis_workbook_bytes(result_df, search_mode, min_qty=min_dist_qty),
@@ -3229,24 +2594,12 @@ st.markdown('</div>', unsafe_allow_html=True)
 # Новый отчёт по прайсу
 # ----------------------
 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-render_block_header(
-    "Отчёт по всему прайсу",
-    "Показывает позиции, где у дистрибьютора цена ниже нашей минимум на выбранный процент. В отчёт попадают только наши позиции в наличии и только нормальные позиции поставщиков в наличии.",
-    icon="📦",
-    help_text="Массовая аналитика по всему вашему прайсу. Помогает быстро найти товары, по которым поставщики продают заметно дешевле, чем вы сейчас продаёте. Учитывает порог в процентах и минимальный остаток у дистрибьютора.",
-)
+st.markdown('<div class="section-title">Отчёт по всему прайсу</div><div class="section-sub">Показывает позиции, где у дистрибьютора цена ниже нашей минимум на выбранный процент. В отчёт попадают только наши позиции в наличии и только нормальные позиции поставщиков в наличии.</div>', unsafe_allow_html=True)
 if current_df is None:
     st.info("Сначала загрузите прайс в левой панели 👈")
 elif not distributor_sources_ready():
     st.info("Загрузите хотя бы один файл дистрибьютора: Ресурс, OCS или Мерлион.")
 else:
-    render_info_banner(
-        "Как пользоваться отчётом по прайсу",
-        "Этот блок нужен для массового контроля цен. Он показывает только те позиции, где поставщик действительно даёт цену ниже вашей минимум на выбранный процент и при этом проходит фильтр по остатку.",
-        icon="📘",
-        chips=["поиск по всему прайсу", "учитывает порог выгоды", "отсеивает единичные остатки"],
-        tone="blue",
-    )
     c1, c2, c3 = st.columns([1, 1, 1.5])
     threshold_val = float(st.session_state.distributor_threshold)
     min_qty_val = float(st.session_state.distributor_min_qty)
@@ -3261,14 +2614,11 @@ else:
 
     report_df = st.session_state.get("distributor_report_df")
     if isinstance(report_df, pd.DataFrame) and not report_df.empty:
-        render_report_summary_cards(report_df, threshold_val, min_qty_val)
-        st.dataframe(report_df, use_container_width=True, hide_index=True, height=440)
-        render_action_callout(
-            "Экспорт отчёта для работы вне приложения",
-            "Скачивай файл, когда нужно быстро обсудить массовые пересмотры цен, отфильтровать позиции в Excel или передать выборку руководителю и коллегам.",
-            icon="📥",
-            badges=["массовый анализ", "готово для Excel", "цены и остатки уже внутри"],
-        )
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Найдено строк", len(report_df))
+        s2.metric("Порог", f"{fmt_qty(threshold_val)}%")
+        s3.metric("Мин. остаток", f"{fmt_qty(min_qty_val)} шт.")
+        st.dataframe(report_df, use_container_width=True, hide_index=True, height=420)
         st.download_button(
             "⬇️ Скачать отчёт в Excel",
             report_to_excel_bytes(report_df),
@@ -3287,12 +2637,7 @@ current_avito_df = st.session_state.get("avito_df")
 if isinstance(current_avito_df, pd.DataFrame) and not current_avito_df.empty and submitted_query.strip():
     avito_matches = find_avito_ads(current_avito_df, submitted_query, result_df)
     st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-    render_block_header(
-        "Объявления Авито по этой позиции",
-        "Ищу совпадения по введённым артикулам и связанным кодам из найденной позиции. Ссылки читаются прямо из гиперссылок Excel.",
-        icon="🛒",
-        help_text="Этот блок показывает связанные объявления из файла Авито. Он помогает быстро открыть существующие карточки и проверить, как товар уже продаётся на площадке.",
-    )
+    st.markdown('<div class="section-title">Объявления Авито по этой позиции</div><div class="section-sub">Ищу совпадения по введённым артикулам и связанным кодам из найденной позиции. Ссылки читаются прямо из гиперссылок Excel.</div>', unsafe_allow_html=True)
     if avito_matches.empty:
         st.info("По текущему запросу объявление в файле Авито не найдено.")
     else:
@@ -3340,12 +2685,7 @@ series_info = get_series_candidates(current_df, submitted_query, st.session_stat
 series_candidates = series_info.get("candidates", []) if isinstance(series_info, dict) else []
 if current_df is not None and submitted_query.strip() and series_candidates:
     st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-    render_block_header(
-        "Серия / цвета по части артикула",
-        "Если по части артикула находится серия, можно быстро отметить нужные позиции и добавить их в основной поиск.",
-        icon="🎨",
-        help_text="Удобный блок для серийных товаров. Если у кода есть несколько цветов, ёмкостей или версий, можно сразу выбрать нужные позиции и одним кликом добавить их в поиск.",
-    )
+    st.markdown('<div class="section-title">Серия / цвета по части артикула</div><div class="section-sub">Если по части артикула находится серия, можно быстро отметить нужные позиции и добавить их в основной поиск.</div>', unsafe_allow_html=True)
     st.radio("Режим серии", ["Только оригиналы", "Показывать всё"], key="series_mode", horizontal=True)
     series_info = get_series_candidates(current_df, submitted_query, st.session_state.series_mode)
     series_candidates = series_info.get("candidates", []) if isinstance(series_info, dict) else []
@@ -3387,12 +2727,7 @@ if current_df is not None and submitted_query.strip() and series_candidates:
 # Шаблоны
 # ----------
 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-render_block_header(
-    "Шаблон 1 — Авито / наличный расчёт",
-    "Авито = цена продажи -12%. Наличный = ещё -10% от цены Авито. Если товара нет по «Свободно», будет «продан».",
-    icon="🧾",
-    help_text="Готовый текст для быстрой отправки или размещения. Автоматически считает цену для Авито и цену за наличный расчёт, а также подставляет статус «продан», если позиции нет в наличии.",
-)
+st.markdown('<div class="section-title">Шаблон 1 — Авито / наличный расчёт</div><div class="section-sub">Авито = цена продажи -12%. Наличный = ещё -10% от цены Авито. Если товара нет по «Свободно», будет «продан».</div>', unsafe_allow_html=True)
 if current_df is None:
     st.info("Сначала загрузите прайс в левой панели 👈")
 elif not submitted_query.strip():
@@ -3407,12 +2742,7 @@ else:
 st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-render_block_header(
-    "Шаблон 2 — название + выбранная цена",
-    f"Цена берётся из выбранного режима слева ({html.escape(price_label)}). Во второй шаблон попадают только позиции, где «Свободно» больше нуля.",
-    icon="💵",
-    help_text="Короткий шаблон для ценников, сообщений или внутренних согласований. Берёт только позиции в наличии и считает цену по текущему выбранному режиму скидки.",
-)
+st.markdown(f'<div class="section-title">Шаблон 2 — название + выбранная цена</div><div class="section-sub">Цена берётся из выбранного режима слева ({html.escape(price_label)}). Во второй шаблон попадают только позиции, где «Свободно» больше нуля.</div>', unsafe_allow_html=True)
 if current_df is None:
     st.info("Сначала загрузите прайс в левой панели 👈")
 elif not submitted_query.strip():
