@@ -1340,17 +1340,30 @@ def collect_quality_flag_text(df: pd.DataFrame) -> pd.Series:
 def parse_resource_qty(value: Any) -> float:
     text = contains_text(value)
     compact = compact_text(value)
+
+    # Ресурс даёт остаток из колонки «Доступно Москва». Там может быть не только число,
+    # но и словесные статусы: Мало / Средне / Среднее / Много / Нет.
+    # Для логики фильтра нам нужно только понять: есть остаток или нет.
+    raw = normalize_text(value)
     try:
-        parsed = float(str(value).replace(" ", "").replace(",", "."))
+        parsed = float(str(raw).replace(" ", "").replace(",", "."))
         return max(0.0, parsed)
     except Exception:
         pass
-    if compact in {"+++", "МНОГО"}:
-        return 10.0
-    if compact in {"++"}:
-        return 5.0
-    if compact in {"+"}:
+
+    m = re.search(r"(\d+[\.,]?\d*)", raw)
+    if m:
+        try:
+            return max(0.0, float(m.group(1).replace(",", ".")))
+        except Exception:
+            pass
+
+    if compact in {"МАЛО", "+"}:
         return 1.0
+    if compact in {"СРЕДНЕ", "СРЕДНЕЕ", "СРЕДНИЙ", "СРЕДНЯЯ", "++"}:
+        return 5.0
+    if compact in {"МНОГО", "+++"}:
+        return 10.0
     if any(x in text for x in ["НЕТ", "ПОД ЗАКАЗ", "ОЖИДАЕТСЯ"]):
         return 0.0
     return 0.0
