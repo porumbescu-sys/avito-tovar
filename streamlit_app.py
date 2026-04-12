@@ -46,13 +46,6 @@ AVITO_COLUMN_ALIASES = {
     "url": ["Ссылка", "URL", "Ссылка на объявление", "Link"],
 }
 
-ARTICLE_REFERENCE_COLUMN_ALIASES = {
-    "brand": ["Производитель", "Бренд", "Марка", "brand"],
-    "article": ["Артикул", "Короткий артикул", "Наш артикул", "article"],
-    "manufacturer_article": ["Артикул производителя", "OEM", "OEM-код", "Код производителя", "manufacturer_article"],
-    "name": ["Номенклатура", "Наименование", "Название", "name"],
-}
-
 COLOR_KEYWORDS = [
     ("желтый", "желтый"),
     ("yellow", "желтый"),
@@ -281,11 +274,8 @@ def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, An
 
 def init_state() -> None:
     defaults = {
-        "catalog_base_df": None,
         "catalog_df": None,
         "catalog_name": "ещё не загружен",
-        "article_ref_df": None,
-        "article_ref_name": "ещё не загружен",
         "avito_df": None,
         "avito_name": "ещё не загружен",
         "resource_df": None,
@@ -616,123 +606,6 @@ def find_column(columns: list[str], candidates: list[str]) -> Optional[str]:
 def detect_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     return {key: find_column(list(df.columns), aliases) for key, aliases in COLUMN_ALIASES.items()}
 
-
-
-def detect_article_reference_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
-    return {key: find_column(list(df.columns), aliases) for key, aliases in ARTICLE_REFERENCE_COLUMN_ALIASES.items()}
-
-
-@st.cache_data(show_spinner=False)
-def load_article_reference_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
-    suffix = Path(file_name).suffix.lower()
-    bio = io.BytesIO(file_bytes)
-    if suffix == ".csv":
-        try:
-            raw = pd.read_csv(bio)
-        except UnicodeDecodeError:
-            bio.seek(0)
-            raw = pd.read_csv(bio, encoding="cp1251")
-    else:
-        raw = pd.read_excel(bio)
-
-    raw = raw.dropna(how="all")
-    mapping = detect_article_reference_columns(raw)
-    if not mapping.get("article") and not mapping.get("manufacturer_article"):
-        raise ValueError("Не удалось определить колонки справочника: нужен хотя бы 'Артикул' или 'Артикул производителя'.")
-    if not mapping.get("name"):
-        raise ValueError("Не удалось определить колонку 'Номенклатура' в справочнике.")
-
-    data = pd.DataFrame()
-    data["article"] = raw[mapping["article"]].map(normalize_text) if mapping.get("article") else ""
-    data["article_norm"] = raw[mapping["article"]].map(normalize_article) if mapping.get("article") else ""
-    data["manufacturer_article"] = raw[mapping["manufacturer_article"]].map(normalize_text) if mapping.get("manufacturer_article") else ""
-    data["manufacturer_article_norm"] = raw[mapping["manufacturer_article"]].map(normalize_article) if mapping.get("manufacturer_article") else ""
-    data["name"] = raw[mapping["name"]].map(normalize_text)
-    data["brand"] = raw.apply(
-        lambda r: normalize_or_infer_brand(r[mapping["brand"]], r[mapping["name"]]) if mapping.get("brand") else infer_brand_from_name(r[mapping["name"]]),
-        axis=1,
-    )
-    data["name_code_list"] = data["name"].map(extract_article_candidates_from_text)
-    data["ref_code_list"] = data.apply(
-        lambda row: unique_norm_codes([row.get("article", ""), row.get("manufacturer_article", ""), *(row.get("name_code_list", []) or [])]),
-        axis=1,
-    )
-    data["is_negative"] = data.apply(
-        lambda row: is_negative_substitute_text(row.get("article", ""), row.get("manufacturer_article", ""), row.get("name", ""), row.get("brand", "")),
-        axis=1,
-    )
-    data = data[data["ref_code_list"].map(lambda x: isinstance(x, list) and len(x) > 0)].copy()
-    data = data[data["is_negative"] != True].copy()
-    data = data.reset_index(drop=True)
-    return data
-
-
-def build_article_reference_lookup(reference_df: pd.DataFrame) -> dict[str, list[int]]:
-    lookup: dict[str, list[int]] = {}
-    if reference_df is None or reference_df.empty:
-        return lookup
-    for idx, row in reference_df.iterrows():
-        for code in row.get("ref_code_list", []) or []:
-            norm = normalize_article(code)
-            if not norm:
-                continue
-            lookup.setdefault(norm, []).append(int(idx))
-    return lookup
-
-
-def expand_catalog_codes_with_reference(catalog_df: pd.DataFrame | None, reference_df: pd.DataFrame | None) -> pd.DataFrame | None:
-    if catalog_df is None:
-        return None
-    if reference_df is None or reference_df.empty:
-        out = catalog_df.copy()
-        if "reference_code_list" not in out.columns:
-            out["reference_code_list"] = [[] for _ in range(len(out))]
-        return out
-
-    ref_lookup = build_article_reference_lookup(reference_df)
-    out = catalog_df.copy()
-
-    def _expand_row(row: pd.Series) -> pd.Series:
-        base_codes = unique_norm_codes(row.get("all_code_list", []) or [row.get("article", ""), *(row.get("name_code_list", []) or [])])
-        if not base_codes:
-            row["reference_code_list"] = []
-            row["all_code_list"] = base_codes
-            return row
-        if is_negative_substitute_text(row.get("article", ""), row.get("name", ""), row.get("brand", "")):
-            row["reference_code_list"] = []
-            row["all_code_list"] = base_codes
-            return row
-
-        own_brand = str(row.get("brand", "") or "")
-        matched_ref_rows: set[int] = set()
-        for code in base_codes:
-            for ref_idx in ref_lookup.get(code, []):
-                ref_row = reference_df.iloc[ref_idx]
-                ref_brand = str(ref_row.get("brand", "") or "")
-                if own_brand and ref_brand and not brand_match(own_brand, ref_brand):
-                    continue
-                matched_ref_rows.add(int(ref_idx))
-
-        ref_codes: list[str] = []
-        for ref_idx in sorted(matched_ref_rows):
-            ref_row = reference_df.iloc[ref_idx]
-            ref_codes.extend(ref_row.get("ref_code_list", []) or [])
-
-        row["reference_code_list"] = unique_norm_codes(ref_codes)
-        row["all_code_list"] = unique_norm_codes([*base_codes, *row["reference_code_list"]])
-        return row
-
-    out = out.apply(_expand_row, axis=1)
-    return out
-
-
-def rebuild_catalog_effective_df() -> None:
-    base_df = st.session_state.get("catalog_base_df")
-    ref_df = st.session_state.get("article_ref_df")
-    if isinstance(base_df, pd.DataFrame):
-        st.session_state.catalog_df = expand_catalog_codes_with_reference(base_df, ref_df)
-    else:
-        st.session_state.catalog_df = None
 
 @st.cache_data(show_spinner=False)
 def load_price_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
@@ -2269,7 +2142,6 @@ def build_display_df(df: pd.DataFrame, price_mode: str, round100: bool, custom_d
             "Всего": out["total_qty"].map(fmt_qty),
             "Цена продажи": out["sale_price"].map(fmt_price),
             label: out["selected_price"].map(fmt_price),
-            "Алиасы из справочника": out.get("reference_code_list", pd.Series([[] for _ in range(len(out))])).map(lambda x: ", ".join(x) if isinstance(x, list) and x else ""),
         }
     )
     if search_mode and distributor_sources_ready():
@@ -2524,31 +2396,12 @@ with st.sidebar:
     uploaded = st.file_uploader("Загрузить прайс", type=["xlsx", "xls", "xlsm", "csv"], label_visibility="collapsed")
     if uploaded is not None:
         try:
-            st.session_state.catalog_base_df = load_price_file(uploaded.name, uploaded.getvalue())
+            st.session_state.catalog_df = load_price_file(uploaded.name, uploaded.getvalue())
             st.session_state.catalog_name = uploaded.name
-            rebuild_catalog_effective_df()
         except Exception as exc:
             st.error(f"Ошибка: {exc}")
     file_caption = st.session_state.get("catalog_name", "Файл ещё не выбран")
     st.markdown(f'<div class="sidebar-status">Загружен: {html.escape(file_caption)}</div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-card-title">Справочник артикулов</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-card-note">Необязательный файл. Используется в самом конце как словарь соответствий между короткими и длинными артикулами.</div>', unsafe_allow_html=True)
-    article_ref_uploaded = st.file_uploader("Загрузить справочник артикулов", type=["xlsx", "xls", "xlsm", "csv"], key="article_ref_uploader", label_visibility="collapsed")
-    if article_ref_uploaded is not None:
-        try:
-            st.session_state.article_ref_df = load_article_reference_file(article_ref_uploaded.name, article_ref_uploaded.getvalue())
-            st.session_state.article_ref_name = article_ref_uploaded.name
-            rebuild_catalog_effective_df()
-            submitted_query = normalize_text(st.session_state.get("submitted_query", ""))
-            if submitted_query and isinstance(st.session_state.catalog_df, pd.DataFrame):
-                st.session_state.last_result = perform_search(st.session_state.catalog_df, submitted_query, st.session_state.get("search_mode", "Только артикул"))
-        except Exception as exc:
-            st.error(f"Ошибка справочника: {exc}")
-    article_ref_caption = st.session_state.get("article_ref_name", "ещё не загружен")
-    st.markdown(f'<div class="sidebar-status">Справочник: {html.escape(article_ref_caption)}</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
@@ -2612,14 +2465,13 @@ CE278AC 7900
 CF364A - 29700 🔽""",
     )
     if st.button("Править цены в прайсе", use_container_width=True):
-        if isinstance(st.session_state.catalog_base_df, pd.DataFrame):
-            updated_base_df, patch_message = apply_price_updates(st.session_state.catalog_base_df, st.session_state.price_patch_input)
-            st.session_state.catalog_base_df = updated_base_df
-            rebuild_catalog_effective_df()
+        if isinstance(st.session_state.catalog_df, pd.DataFrame):
+            updated_df, patch_message = apply_price_updates(st.session_state.catalog_df, st.session_state.price_patch_input)
+            st.session_state.catalog_df = updated_df
             st.session_state.patch_message = patch_message
             submitted_query = normalize_text(st.session_state.get("submitted_query", ""))
-            if submitted_query and isinstance(st.session_state.catalog_df, pd.DataFrame):
-                st.session_state.last_result = perform_search(st.session_state.catalog_df, submitted_query, st.session_state.get("search_mode", "Только артикул"))
+            if submitted_query:
+                st.session_state.last_result = perform_search(updated_df, submitted_query, st.session_state.get("search_mode", "Только артикул"))
         else:
             st.session_state.patch_message = "Сначала загрузите прайс."
     if st.session_state.patch_message:
