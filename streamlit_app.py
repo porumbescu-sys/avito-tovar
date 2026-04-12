@@ -542,14 +542,45 @@ def row_catalog_search_codes(row: pd.Series | dict[str, Any]) -> list[str]:
     return build_catalog_code_list(row.get("article", ""), row.get("name", ""))
 
 
+def article_family_core(value: object) -> str:
+    norm = normalize_article(value)
+    if not norm:
+        return ""
+    m = re.match(r"^(.*?\d)", norm)
+    return m.group(1) if m else norm
+
+
+def same_article_family_code(a: object, b: object) -> bool:
+    a_norm = normalize_article(a)
+    b_norm = normalize_article(b)
+    if not a_norm or not b_norm:
+        return False
+    if a_norm == b_norm:
+        return True
+    if a_norm.endswith("P") and a_norm[:-1] == b_norm:
+        return True
+    if b_norm.endswith("P") and b_norm[:-1] == a_norm:
+        return True
+    a_core = article_family_core(a_norm)
+    b_core = article_family_core(b_norm)
+    return bool(a_core and b_core and a_core == b_core)
+
+
 def row_catalog_compare_codes(row: pd.Series | dict[str, Any], token: str = "") -> list[str]:
     article = row.get("article", "")
     name = row.get("name", "")
     brand = row.get("brand", "")
     token_norm = normalize_article(token)
+    base_norm = token_norm or normalize_article(article)
     if is_negative_substitute_text(article, name, brand):
         return unique_norm_codes([article, token_norm])
-    return unique_norm_codes([token_norm, *row_catalog_search_codes(row)])
+    all_codes = row_catalog_search_codes(row)
+    if not base_norm:
+        return unique_norm_codes([token_norm, *all_codes])
+    strong_codes = [code for code in all_codes if same_article_family_code(code, base_norm)]
+    if strong_codes:
+        return unique_norm_codes([base_norm, token_norm, *strong_codes])
+    return unique_norm_codes([token_norm, *all_codes])
 
 
 def row_has_negative_series_markers(row: pd.Series) -> bool:
@@ -1607,10 +1638,8 @@ def resource_search_candidates(df: pd.DataFrame, token_norm: str, own_article_no
 
     name_code = working[working["name_code_list"].apply(lambda codes: any(code in codes for code in search_codes) if isinstance(codes, list) else False)].copy()
     if not name_code.empty:
-        name_code = name_code[name_code.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
-        if not name_code.empty:
-            name_code["_match_rank"] = 3
-            return name_code
+        name_code["_match_rank"] = 3
+        return name_code
 
     return working.iloc[0:0].copy()
 
@@ -1653,10 +1682,8 @@ def ocs_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: s
 
     name_code = working[working["name_code_list"].apply(lambda codes: any(code in codes for code in search_codes) if isinstance(codes, list) else False)].copy()
     if not name_code.empty:
-        name_code = name_code[name_code.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
-        if not name_code.empty:
-            name_code["_match_rank"] = 3
-            return name_code
+        name_code["_match_rank"] = 3
+        return name_code
 
     return working.iloc[0:0].copy()
 
