@@ -1748,6 +1748,52 @@ def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article
     return working.iloc[0:0].copy()
 
 
+def _direct_source_fallback_candidates(df: pd.DataFrame, choice: dict[str, Any], token: str, min_qty: float = 1.0) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df.iloc[0:0].copy()
+
+    own_brand = str(choice.get("brand", "") or "")
+    own_article_norm = normalize_article(choice.get("article", ""))
+    token_norm = normalize_article(token)
+    own_compare_codes = row_catalog_compare_codes(choice, token)
+    search_codes = unique_norm_codes([token_norm, own_article_norm, *(own_compare_codes or [])])
+    if not search_codes:
+        return df.iloc[0:0].copy()
+
+    working = df.copy()
+    working = working[working["free_qty"].astype(float) >= float(min_qty)].copy()
+    if working.empty:
+        return working
+
+    exact_mask = working["article_norm"].isin(search_codes) | working["alt_article_norm"].isin(search_codes)
+    pantum_mask = working.apply(lambda r: any(pantum_safe_p_alias_match(code, r, own_brand=own_brand) for code in search_codes), axis=1)
+    cand = working[exact_mask | pantum_mask].copy()
+    if cand.empty:
+        return cand
+
+    cand = cand[~cand.apply(row_has_bad_offer_markers, axis=1)].copy()
+    if cand.empty:
+        return cand
+
+    if "is_original" in cand.columns:
+        orig = cand[cand["is_original"] == True].copy()
+        if not orig.empty:
+            cand = orig
+
+    cand = cand[cand.apply(lambda r: is_confident_distributor_row_for_choice(r, choice, token_norm, own_codes=own_compare_codes), axis=1)].copy()
+    if cand.empty:
+        return cand
+
+    if own_brand:
+        brand_filtered = cand[cand["brand"].apply(lambda x: brand_match(own_brand, str(x)))]
+        if not brand_filtered.empty:
+            cand = brand_filtered
+
+    cand["_match_rank"] = cand.get("_match_rank", 50)
+    cand["_fallback_used"] = True
+    return cand
+
+
 def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, Any], token: str, search_mode: str, min_qty: float = 1.0) -> dict[str, Any] | None:
     if df is None or df.empty:
         return None
@@ -1760,11 +1806,16 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
     own_compare_codes = row_catalog_compare_codes(choice, token)
 
     cand = distributor_search_candidates(df, token_norm, own_article_norm, search_mode, own_codes=own_compare_codes)
+    used_fallback = False
+    if cand.empty:
+        cand = _direct_source_fallback_candidates(df, choice, token, min_qty=min_qty)
+        used_fallback = not cand.empty
     if cand.empty:
         return None
     cand = cand[cand["free_qty"].astype(float) >= float(min_qty)].copy()
-    if "is_good_offer" in cand.columns:
-        cand = cand[cand["is_good_offer"] == True].copy()
+    strict = cand[cand["is_good_offer"] == True].copy() if "is_good_offer" in cand.columns else cand.copy()
+    if not strict.empty:
+        cand = strict
     if cand.empty:
         return None
     if own_is_original:
@@ -1793,6 +1844,7 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
         "brand": str(row.get("brand", "")),
         "free_qty": float(row.get("free_qty", 0) or 0),
         "match_rank": int(row.get("_match_rank", 99) or 99),
+        "fallback_used": bool(used_fallback or bool(row.get("_fallback_used", False))),
     }
     if own_price > 0:
         delta = own_price - price
@@ -1807,6 +1859,8 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
             offer["status"] = "лучше нас"
         else:
             offer["status"] = "дороже нас"
+    if offer.get("fallback_used"):
+        offer["status_note"] = "найдено по прямому коду"
     return offer
 
 
