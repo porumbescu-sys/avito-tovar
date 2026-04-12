@@ -506,6 +506,15 @@ def is_candidate_article_norm(norm: str) -> bool:
     return len(norm) >= 3 and any(ch.isdigit() for ch in norm) and any(ch.isalpha() for ch in norm)
 
 
+def is_low_signal_name_code(norm: str) -> bool:
+    if not norm:
+        return True
+    # Ёмкость/ресурс вроде 3K, 6K, 15K, 1.5K -> после normalise это 15K.
+    if re.fullmatch(r"\d+[A-ZА-Я]{1,2}", norm):
+        return True
+    return False
+
+
 def extract_article_candidates_from_text(text: object) -> list[str]:
     raw = str(text or "").upper()
     prepared = re.sub(r"[|/\\,;:()\[\]{}]+", " ", raw)
@@ -515,7 +524,7 @@ def extract_article_candidates_from_text(text: object) -> list[str]:
     seen: set[str] = set()
     for chunk in chunks:
         norm = normalize_article(chunk)
-        if not is_candidate_article_norm(norm) or norm in seen:
+        if not is_candidate_article_norm(norm) or is_low_signal_name_code(norm) or norm in seen:
             continue
         seen.add(norm)
         out.append(norm)
