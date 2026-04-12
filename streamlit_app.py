@@ -76,6 +76,12 @@ COLOR_KEYWORDS = [
     ("зел", "зеленый"),
 ]
 
+CYRILLIC_ARTICLE_TRANSLATION = str.maketrans({
+    "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "У": "Y", "Х": "X",
+    "а": "A", "в": "B", "е": "E", "к": "K", "м": "M", "н": "H", "о": "O", "р": "P", "с": "C", "т": "T", "у": "Y", "х": "X",
+    "Ё": "E", "ё": "E",
+})
+
 ARTICLE_PIECE_RE = re.compile(r"^[A-Za-zА-Яа-я0-9._-]{3,}$")
 SERIES_SUFFIX_ORDER = {
     "A": 0,
@@ -337,7 +343,10 @@ def normalize_text(value: object) -> str:
 
 def normalize_article(value: object) -> str:
     text = normalize_text(value)
-    return re.sub(r"[^A-Za-zА-Яа-я0-9]", "", text).upper()
+    if not text:
+        return ""
+    text = text.translate(CYRILLIC_ARTICLE_TRANSLATION)
+    return re.sub(r"[^A-Za-z0-9]", "", text).upper()
 
 
 def contains_text(value: object) -> str:
@@ -2204,7 +2213,7 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
         if not own_row.empty:
             own_price = own_row.iloc[0].get("Цена")
             own_qty = own_row.iloc[0].get("Остаток")
-            own_price_line = f"Наша цена: **{fmt_price(own_price)} руб.** • Остаток: **{fmt_qty(own_qty)}**"
+            own_price_line = f"Наша цена: {fmt_price(own_price)} руб. • Остаток: {fmt_qty(own_qty)}"
 
         st.markdown(
             f"""
@@ -2239,7 +2248,7 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
                 source_name = normalize_text(rec.get("Название источника", ""))
 
                 card_lines = [
-                    f"**{source}**",
+                    f"<div class='offer-card-source'>{html.escape(source)}</div>",
                     f"<span class='offer-status-badge {status_class}'>{html.escape(badge_text)}</span>",
                     f"<div class='offer-card-price'>{html.escape(fmt_price(price_val) if pd.notna(price_val) else '—')} {'руб.' if pd.notna(price_val) else ''}</div>",
                     f"<div class='offer-card-meta'>Остаток: <b>{html.escape(fmt_qty(qty_val) if pd.notna(qty_val) else '—')}</b></div>",
