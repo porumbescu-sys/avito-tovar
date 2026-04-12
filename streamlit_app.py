@@ -2171,90 +2171,108 @@ def build_product_analysis_workbook_bytes(result_df: pd.DataFrame, search_mode: 
     return bio.read()
 
 
+
 def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: str, min_qty: float, price_mode: str, round100: bool, custom_discount: float) -> None:
-    all_prices_df = build_all_distributor_prices_df(result_df, search_mode, min_qty=min_qty, price_mode=price_mode, round100=round100, custom_discount=custom_discount)
+    all_prices_df = build_all_distributor_prices_df(
+        result_df,
+        search_mode,
+        min_qty=min_qty,
+        price_mode=price_mode,
+        round100=round100,
+        custom_discount=custom_discount,
+    )
     if all_prices_df.empty:
         st.info("Для текущего запроса нет данных по всем ценам дистрибьютеров.")
         return
 
     st.caption("Здесь видно не только лучшую цену, но и следующую цену у других дистрибьютеров, плюс остаток. Это помогает не снижать цену из-за единичного хвоста на складе.")
+
+    source_order = {"Мы": 0, "Ресурс": 1, "OCS": 2, "Мерлион": 3}
+    status_label_map = {
+        "offer-good": "🟢 выгоднее",
+        "offer-bad": "🔴 дороже",
+        "offer-neutral": "🟡 цена равна",
+        "offer-own": "🔵 наша позиция",
+        "offer-muted": "⚪ без статуса",
+    }
+
     for article, group_df in all_prices_df.groupby("Артикул", sort=False):
         base_name = normalize_text(group_df.iloc[0].get("Название", ""))
         own_row = group_df[group_df["Источник"] == "Мы"].head(1)
-        own_price_html = ""
+
+        own_price_line = ""
         if not own_row.empty:
             own_price = own_row.iloc[0].get("Цена")
             own_qty = own_row.iloc[0].get("Остаток")
-            own_price_html = f"<div class='all-prices-own'>Наша цена: <b>{html.escape(fmt_price(own_price))} руб.</b> • Остаток: <b>{html.escape(fmt_qty(own_qty))}</b></div>"
+            own_price_line = f"Наша цена: **{fmt_price(own_price)} руб.** • Остаток: **{fmt_qty(own_qty)}**"
+
         st.markdown(
             f"""
             <div class='all-prices-head'>
               <div>
                 <div class='all-prices-article'>{html.escape(article)}</div>
                 <div class='all-prices-name'>{html.escape(base_name)}</div>
-                {own_price_html}
+                <div class='all-prices-own'>{own_price_line}</div>
               </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        cards: list[str] = []
-        order_rank = {"Мы": 0, "Ресурс": 1, "OCS": 2, "Мерлион": 3}
-        group_df = group_df.copy()
-        group_df["_rank"] = group_df["Источник"].map(lambda x: order_rank.get(str(x), 99))
-        group_df = group_df.sort_values(["_rank", "Цена"], na_position="last")
-        for _, rec in group_df.iterrows():
-            source = str(rec.get("Источник", "") or "")
-            price_val = rec.get("Цена")
-            qty_val = rec.get("Остаток")
-            status = str(rec.get("Статус", "") or "")
-            status_class = status_visual_class(status)
-            diff_rub = rec.get("Разница к нам, руб")
-            diff_pct = rec.get("Разница к нам, %")
-            source_article = normalize_text(rec.get("Артикул источника", ""))
-            source_name = normalize_text(rec.get("Название источника", ""))
-            if pd.notna(price_val):
-                price_html = f"{html.escape(fmt_price(price_val))} руб."
-            else:
-                price_html = "—"
-            if pd.notna(qty_val):
-                qty_html = html.escape(fmt_qty(qty_val))
-            else:
-                qty_html = "—"
-            diff_line = ""
-            if source != "Мы" and pd.notna(diff_rub):
-                sign = "+" if float(diff_rub) < 0 else ""
-                diff_pct_txt = "" if pd.isna(diff_pct) else f" • {round(float(diff_pct), 2):g}%"
-                diff_line = f"<div class='offer-meta'>Разница к нам: {sign}{html.escape(fmt_price(diff_rub))} руб.{html.escape(diff_pct_txt)}</div>"
-            article_line = f"<div class='offer-code'>{html.escape(source_article)}</div>" if source_article else ""
-            name_line = f"<div class='offer-name'>{html.escape(source_name)}</div>" if source_name else ""
-            cards.append(
-                f"""
-                <div class='offer-card {status_class}'>
-                  <div class='offer-card-top'>
-                    <div class='offer-source'>{html.escape(source)}</div>
-                    <div class='offer-status {status_class}'>{html.escape(status or 'найдено')}</div>
-                  </div>
-                  <div class='offer-price'>{price_html}</div>
-                  <div class='offer-meta'>Остаток: {qty_html}</div>
-                  {diff_line}
-                  {article_line}
-                  {name_line}
-                </div>
-                """
-            )
-        st.markdown(f"<div class='offers-grid'>{''.join(cards)}</div>", unsafe_allow_html=True)
+        work_df = group_df.copy()
+        work_df["_rank"] = work_df["Источник"].map(lambda x: source_order.get(str(x), 99))
+        work_df = work_df.sort_values(["_rank", "Цена"], na_position="last").reset_index(drop=True)
 
-        show_df = group_df[[
-            "Источник", "Цена", "Остаток", "Разница к нам, руб", "Разница к нам, %", "Статус", "Артикул источника", "Название источника"
-        ]].copy()
+        cols = st.columns(4)
+        for idx, (_, rec) in enumerate(work_df.iterrows()):
+            with cols[idx % 4]:
+                source = str(rec.get("Источник", "") or "")
+                status = str(rec.get("Статус", "") or "")
+                status_class = status_visual_class(status)
+                badge_text = status_label_map.get(status_class, status or "найдено")
+
+                price_val = rec.get("Цена")
+                qty_val = rec.get("Остаток")
+                diff_rub = rec.get("Разница к нам, руб")
+                diff_pct = rec.get("Разница к нам, %")
+                source_article = normalize_text(rec.get("Артикул источника", ""))
+                source_name = normalize_text(rec.get("Название источника", ""))
+
+                card_lines = [
+                    f"**{source}**",
+                    f"<span class='offer-status-badge {status_class}'>{html.escape(badge_text)}</span>",
+                    f"<div class='offer-card-price'>{html.escape(fmt_price(price_val) if pd.notna(price_val) else '—')} {'руб.' if pd.notna(price_val) else ''}</div>",
+                    f"<div class='offer-card-meta'>Остаток: <b>{html.escape(fmt_qty(qty_val) if pd.notna(qty_val) else '—')}</b></div>",
+                ]
+
+                if source != "Мы" and pd.notna(diff_rub):
+                    diff_pct_txt = f" • {round(float(diff_pct), 2):g}%" if pd.notna(diff_pct) else ""
+                    sign = "+" if float(diff_rub) < 0 else ""
+                    card_lines.append(
+                        f"<div class='offer-card-meta'>Разница к нам: {sign}{html.escape(fmt_price(diff_rub))} руб.{html.escape(diff_pct_txt)}</div>"
+                    )
+
+                if source_article:
+                    card_lines.append(f"<div class='offer-card-code'>{html.escape(source_article)}</div>")
+                if source_name:
+                    card_lines.append(f"<div class='offer-card-name'>{html.escape(source_name)}</div>")
+
+                st.markdown(
+                    "<div class='offer-card-simple'>" + "".join(card_lines) + "</div>",
+                    unsafe_allow_html=True,
+                )
+
+        show_df = work_df[
+            ["Источник", "Цена", "Остаток", "Разница к нам, руб", "Разница к нам, %", "Статус", "Артикул источника", "Название источника"]
+        ].copy()
         show_df["Цена"] = show_df["Цена"].apply(lambda v: fmt_price(v) if pd.notna(v) else "")
         show_df["Остаток"] = show_df["Остаток"].apply(lambda v: fmt_qty(v) if pd.notna(v) else "")
         show_df["Разница к нам, руб"] = show_df["Разница к нам, руб"].apply(lambda v: fmt_price(v) if pd.notna(v) else "")
         show_df["Разница к нам, %"] = show_df["Разница к нам, %"].apply(lambda v: (str(round(float(v), 2)).replace(".0", "") + "%") if pd.notna(v) else "")
         with st.expander(f"Таблица по {article}"):
             st.dataframe(show_df, use_container_width=True, hide_index=True, height=min(260, 70 + len(show_df) * 36))
+
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
     st.download_button(
         "⬇️ Скачать все цены в Excel",
