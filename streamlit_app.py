@@ -1359,7 +1359,13 @@ def parse_ocs_qty(value: Any) -> float:
         return max(0.0, parsed)
     except Exception:
         pass
-    if compact in {"ЕСТЬ", "+", "+++"}:
+    if compact in {"ЕСТЬ", "+", "+ + +", "+++", "ВНАЛИЧИИ", "В НАЛИЧИИ"}:
+        return 5.0
+    if compact in {"МАЛО"}:
+        return 1.0
+    if compact in {"СРЕДНЕ", "СРЕДНЕЕ", "СРЕДНИЙ", "СРЕДНЯЯ"}:
+        return 5.0
+    if compact in {"МНОГО"}:
         return 10.0
     if any(marker in text for marker in ["ПОД ЗАКАЗ", "ОЖИДАЕТСЯ", "НЕТ"]):
         return 0.0
@@ -1458,7 +1464,7 @@ def load_ocs_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     data["brand"] = pd.Series(df.get("Производитель", ""), index=df.index).combine(df.get("Наименование", ""), lambda b, n: normalize_or_infer_brand(b, n))
     data["product_type"] = df.get("Категория оборудования", "").map(normalize_text) if "Категория оборудования" in df.columns else ""
     data["price"] = pd.to_numeric(df.get("Цена", 0), errors="coerce")
-    data["free_qty"] = df.get("Доступно для резерва", 0).map(parse_ocs_qty)
+    data["free_qty"] = first_existing_series(df, ["Москва", "Доступно для резерва", "Моск", "Наличие Москва"], 0).map(parse_ocs_qty)
     data["quality_flags"] = collect_quality_flag_text(df)
     data = standardize_distributor_result(data, "OCS")
     data["ocs_type_ok"] = data["product_type"].apply(is_ocs_allowed_type)
