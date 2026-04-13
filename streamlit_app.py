@@ -574,14 +574,14 @@ def merlion_brand_filter(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df.iloc[0:0].copy()
     out = df.copy()
-    if "group_root" in out.columns:
-        out = out[out["group_root"].apply(is_merlion_allowed_root)].copy()
-    if "group_level2" in out.columns:
-        out = out[out["group_level2"].apply(is_merlion_allowed_group2)].copy()
+    root_ok = out["group_root"].apply(is_merlion_allowed_root) if "group_root" in out.columns else True
+    group2_ok = out["group_level2"].apply(is_merlion_allowed_group2) if "group_level2" in out.columns else True
     if "product_type" in out.columns:
-        out = out[out["product_type"].apply(is_merlion_allowed_type)].copy()
-    if "brand" in out.columns:
-        out = out[out["brand"].apply(is_merlion_allowed_brand)].copy()
+        type_ok = out.apply(lambda r: is_merlion_allowed_type(r.get("product_type", "")) or is_merlion_allowed_type(r.get("name", "")), axis=1)
+    else:
+        type_ok = True
+    brand_ok = out["brand"].apply(is_merlion_allowed_brand) if "brand" in out.columns else True
+    out = out[root_ok & group2_ok & type_ok & brand_ok].copy()
     return out.reset_index(drop=True)
 
 
