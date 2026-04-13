@@ -2529,7 +2529,7 @@ def build_product_analysis_workbook_bytes(result_df: pd.DataFrame, search_mode: 
 
 
 
-def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: str, min_qty: float, price_mode: str, round100: bool, custom_discount: float, external_df: Optional[pd.DataFrame] = None, show_external_banner: bool = True) -> None:
+def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: str, min_qty: float, price_mode: str, round100: bool, custom_discount: float, external_df: Optional[pd.DataFrame] = None, show_external_banner: bool = True, widget_key_prefix: str = 'main') -> None:
     all_prices_df = build_all_distributor_prices_df(
         result_df,
         search_mode,
@@ -2658,6 +2658,7 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
         all_prices_to_excel_bytes(all_prices_df),
         file_name="moy_tovar_all_distributor_prices.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"download_all_prices_{widget_key_prefix}",
     )
 
 
@@ -2764,6 +2765,7 @@ def render_market_candidates_section(external_df: pd.DataFrame, search_mode: str
         custom_discount,
         external_df=external_df,
         show_external_banner=False,
+        widget_key_prefix='candidates',
     )
 
     render_action_callout(
@@ -2778,6 +2780,7 @@ def render_market_candidates_section(external_df: pd.DataFrame, search_mode: str
         file_name="market_candidates_analysis.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         help="Файл для анализа новых позиций: артикул, лучший дистрибьютер, цена, остаток, источник, комментарий и решение.",
+        key='download_market_candidates_analysis',
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
