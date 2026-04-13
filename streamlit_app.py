@@ -3313,7 +3313,7 @@ def render_results_table(df: pd.DataFrame, price_mode: str, round100: bool, cust
             f"""
             <tr>
               <td><span class='article-pill'>{html.escape(str(row['article']))}</span></td>
-              <td><div class='name-cell'>{html.escape(str(row['name']))}</div>{badge_html}</td>
+              <td><div class='name-cell' title="{html.escape(str(row['name']))}">{html.escape(str(row['name']))}</div>{badge_html}</td>
               <td>{html.escape(str(row['brand'] or ''))}</td>
               <td>{fmt_qty(row['free_qty'])}</td>
               <td>{fmt_qty(row['total_qty'])}</td>
