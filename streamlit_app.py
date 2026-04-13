@@ -1498,6 +1498,7 @@ def standardize_distributor_result(data: pd.DataFrame, distributor: str) -> pd.D
     data["price"] = pd.to_numeric(data["price"], errors="coerce").fillna(0)
     data["name_tokens"] = data["name"].map(tokenize_text)
     data["name_code_list"] = data["name"].map(extract_article_candidates_from_text)
+    data["alt_code_list"] = data["alt_article"].map(extract_alt_article_candidates)
     data["search_blob"] = (
         data["article"].astype(str)
         + " " + data["alt_article"].astype(str)
@@ -1698,6 +1699,17 @@ def family_compatible(own_row: dict[str, Any], dist_row: pd.Series) -> bool:
 
 
 
+def row_alt_exact_match_mask(df: pd.DataFrame, search_codes: list[str]) -> pd.Series:
+    if df is None or df.empty:
+        return pd.Series(dtype=bool)
+    code_set = set(unique_norm_codes(search_codes))
+    if not code_set:
+        return pd.Series([False] * len(df), index=df.index)
+    if "alt_code_list" in df.columns:
+        return df["alt_code_list"].apply(lambda codes: any(code in code_set for code in (codes or [])) if isinstance(codes, list) else False)
+    return df["alt_article_norm"].isin(code_set)
+
+
 def resource_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str, own_codes: Optional[list[str]] = None) -> pd.DataFrame:
     if df is None or df.empty:
         return df.iloc[0:0].copy()
@@ -1867,9 +1879,19 @@ def tis_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: s
     if not primary_exact.empty:
         return primary_exact
 
-    alt_exact = working[working["alt_article_norm"].isin(search_codes)].copy()
+    alt_exact = working[row_alt_exact_match_mask(working, search_codes)].copy()
     if not alt_exact.empty:
-        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, next((c for c in search_codes if normalize_article(r.get("alt_article", "")) == c), token_norm or own_article_norm)), axis=1)].copy()
+        def _matched_alt_code_tis(r: pd.Series) -> str:
+            alt_codes = r.get("alt_code_list", []) or []
+            for code in search_codes:
+                if code in alt_codes:
+                    return code
+            alt_norm = normalize_article(r.get("alt_article", ""))
+            for code in search_codes:
+                if alt_norm == code:
+                    return code
+            return token_norm or own_article_norm
+        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, _matched_alt_code_tis(r)), axis=1)].copy()
         alt_exact = _pick_with_sheet_priority(alt_exact, 1)
         if not alt_exact.empty:
             return alt_exact
