@@ -134,6 +134,8 @@ OCS_ALLOWED_PRODUCT_TYPES = {
 MERLION_ALLOWED_GROUP1_TYPES = {"РАСХОДНЫЕ МАТЕРИАЛЫ"}
 MERLION_ALLOWED_GROUP2_TYPES = {"ОРИГИНАЛЬНЫЕ"}
 TIS_ALLOWED_GROUP_TYPES = {"РАСХОДНЫЕ МАТЕРИАЛЫ"}
+TIS_ALLOWED_ZIP_GROUP_TYPES = {"ЗИП"}
+TIS_ALLOWED_ZIP_SUBGROUP_TYPES = {"ЗАПЧАСТИ"}
 TIS_ALLOWED_BRAND_KEYS = {
     "AVISION", "BROTHER", "CANON", "FPLUSIMAGING", "HP", "KONICAMINOLTA", "KYOCERAMITA",
     "OKI", "RICOH", "RICOHPRO", "SHARP", "XEROX", "КАТЮША"
@@ -497,6 +499,24 @@ def is_tis_allowed_type(value: object) -> bool:
     return contains_text(value) in TIS_ALLOWED_GROUP_TYPES
 
 
+def is_tis_allowed_zip_group(value: object) -> bool:
+    return contains_text(value) in TIS_ALLOWED_ZIP_GROUP_TYPES
+
+
+def is_tis_allowed_zip_subgroup(value: object) -> bool:
+    return contains_text(value) in TIS_ALLOWED_ZIP_SUBGROUP_TYPES
+
+
+def is_tis_row_allowed(group_value: object, subgroup_value: object) -> bool:
+    group_text = contains_text(group_value)
+    subgroup_text = contains_text(subgroup_value)
+    if group_text in TIS_ALLOWED_GROUP_TYPES:
+        return True
+    if group_text in TIS_ALLOWED_ZIP_GROUP_TYPES and subgroup_text in TIS_ALLOWED_ZIP_SUBGROUP_TYPES:
+        return True
+    return False
+
+
 def is_tis_allowed_brand(value: object) -> bool:
     key = canonical_brand_key(value)
     return bool(key) and key in TIS_ALLOWED_BRAND_KEYS
@@ -544,7 +564,8 @@ def tis_brand_filter(df: pd.DataFrame) -> pd.DataFrame:
         return df.iloc[0:0].copy()
     out = df.copy()
     if "product_type" in out.columns:
-        out = out[out["product_type"].apply(is_tis_allowed_type)].copy()
+        subgroup_series = out["group2"] if "group2" in out.columns else ""
+        out = out[[is_tis_row_allowed(g, s) for g, s in zip(out["product_type"], subgroup_series)]].copy()
     if "brand" in out.columns:
         out = out[out["brand"].apply(is_tis_allowed_brand)].copy()
     return out.reset_index(drop=True)
@@ -1609,7 +1630,7 @@ def load_tis_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
         data = standardize_distributor_result(data, "Тис")
         data["sheet_name"] = source_sheet
         data["sheet_priority"] = priority
-        data["tis_type_ok"] = data["product_type"].apply(is_tis_allowed_type)
+        data["tis_type_ok"] = [is_tis_row_allowed(g, s) for g, s in zip(data["product_type"], data["group2"])]
         data["tis_brand_ok"] = data["brand"].apply(is_tis_allowed_brand)
         data["is_original"] = ~data.apply(lambda r: is_negative_substitute_text(r["article"], r["alt_article"], r["name"], r["brand"], r.get("group2", "")), axis=1)
         data["is_good_offer"] = (
