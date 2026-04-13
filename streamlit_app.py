@@ -286,12 +286,16 @@ def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, An
 
     row_article_norm = normalize_article(row.get("article", ""))
     row_alt_norm = normalize_article(row.get("alt_article", ""))
+    row_alt_codes = set(unique_norm_codes(row.get("alt_code_list", []) or []))
 
     # Сильные совпадения по коду не должны отрезаться эвристикой по типу товара.
     if row_article_norm in code_pool:
         return True
     if row_alt_norm in code_pool:
         return is_confident_alt_exact_match(row, row_alt_norm)
+    if row_alt_codes & code_pool:
+        matched = next(iter(row_alt_codes & code_pool))
+        return is_confident_alt_exact_match(row, matched)
     for code in code_pool:
         if pantum_safe_p_alias_match(code, row, own_brand=own_brand):
             return True
