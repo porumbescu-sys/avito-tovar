@@ -1946,6 +1946,7 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
         "brand": str(row.get("brand", "")),
         "free_qty": float(row.get("free_qty", 0) or 0),
         "match_rank": int(row.get("_match_rank", 99) or 99),
+        "source_sheet": str(row.get("sheet_name", "") or ""),
     }
     if own_price > 0:
         delta = own_price - price
@@ -2053,6 +2054,7 @@ def build_all_distributor_prices_df(result_df: pd.DataFrame, search_mode: str, m
             "Название": name,
             "Производитель": brand,
             "Источник": "Мы",
+            "Лист источника": "",
             "Наша цена": own_price,
             "Наша цена выбранная": selected_price,
             "Наш остаток": own_qty,
@@ -2082,6 +2084,7 @@ def build_all_distributor_prices_df(result_df: pd.DataFrame, search_mode: str, m
                     "Название": name,
                     "Производитель": brand,
                     "Источник": source_name,
+                    "Лист источника": str(offer.get("source_sheet", "") or ""),
                     "Наша цена": own_price,
                     "Наша цена выбранная": selected_price,
                     "Наш остаток": own_qty,
@@ -2099,6 +2102,7 @@ def build_all_distributor_prices_df(result_df: pd.DataFrame, search_mode: str, m
                     "Название": name,
                     "Производитель": brand,
                     "Источник": source_name,
+                    "Лист источника": "",
                     "Наша цена": own_price,
                     "Наша цена выбранная": selected_price,
                     "Наш остаток": own_qty,
@@ -2349,7 +2353,6 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
 
     st.caption("Здесь видно не только лучшую цену, но и следующую цену у других дистрибьютеров, плюс остаток. Это помогает не снижать цену из-за единичного хвоста на складе.")
 
-    source_order = {"Мы": 0, "Ресурс": 1, "OCS": 2, "Мерлион": 3}
     status_label_map = {
         "offer-good": "🟢 выгоднее",
         "offer-bad": "🔴 дороже",
@@ -2382,12 +2385,13 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
         )
 
         work_df = group_df.copy()
-        work_df["_rank"] = work_df["Источник"].map(lambda x: source_order.get(str(x), 99))
-        work_df = work_df.sort_values(["_rank", "Цена"], na_position="last").reset_index(drop=True)
+        work_df["_is_own"] = work_df["Источник"].map(lambda x: 0 if str(x) == "Мы" else 1)
+        work_df["_price_missing"] = work_df["Цена"].isna().astype(int)
+        work_df = work_df.sort_values(["_is_own", "_price_missing", "Цена", "Источник"], ascending=[True, True, True, True], na_position="last").reset_index(drop=True)
 
-        cols = st.columns(4)
+        cols = st.columns(max(len(work_df), 1))
         for idx, (_, rec) in enumerate(work_df.iterrows()):
-            with cols[idx % 4]:
+            with cols[idx]:
                 source = str(rec.get("Источник", "") or "")
                 status = str(rec.get("Статус", "") or "")
                 status_class = status_visual_class(status)
@@ -2399,6 +2403,7 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
                 diff_pct = rec.get("Разница к нам, %")
                 source_article = normalize_text(rec.get("Артикул источника", ""))
                 source_name = normalize_text(rec.get("Название источника", ""))
+                source_sheet = normalize_text(rec.get("Лист источника", ""))
 
                 card_lines = [
                     f"<div class='offer-card-source'>{html.escape(source)}</div>",
@@ -2406,6 +2411,9 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
                     f"<div class='offer-card-price'>{html.escape(fmt_price(price_val) if pd.notna(price_val) else '—')} {'руб.' if pd.notna(price_val) else ''}</div>",
                     f"<div class='offer-card-meta'>Остаток: <b>{html.escape(fmt_qty(qty_val) if pd.notna(qty_val) else '—')}</b></div>",
                 ]
+
+                if source == "Тис" and source_sheet:
+                    card_lines.append(f"<div class='offer-card-meta'><b>Источник:</b> {html.escape(source_sheet)}</div>")
 
                 if source != "Мы" and pd.notna(diff_rub):
                     diff_pct_txt = f" • {round(float(diff_pct), 2):g}%" if pd.notna(diff_pct) else ""
@@ -2424,9 +2432,8 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
                     unsafe_allow_html=True,
                 )
 
-        show_df = work_df[
-            ["Источник", "Цена", "Остаток", "Разница к нам, руб", "Разница к нам, %", "Статус", "Артикул источника", "Название источника"]
-        ].copy()
+        show_cols = ["Источник", "Лист источника", "Цена", "Остаток", "Разница к нам, руб", "Разница к нам, %", "Статус", "Артикул источника", "Название источника"]
+        show_df = work_df[show_cols].copy()
         show_df["Цена"] = show_df["Цена"].apply(lambda v: fmt_price(v) if pd.notna(v) else "")
         show_df["Остаток"] = show_df["Остаток"].apply(lambda v: fmt_qty(v) if pd.notna(v) else "")
         show_df["Разница к нам, руб"] = show_df["Разница к нам, руб"].apply(lambda v: fmt_price(v) if pd.notna(v) else "")
