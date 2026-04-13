@@ -133,6 +133,11 @@ OCS_ALLOWED_PRODUCT_TYPES = {
 }
 MERLION_ALLOWED_GROUP1_TYPES = {"РАСХОДНЫЕ МАТЕРИАЛЫ"}
 MERLION_ALLOWED_GROUP2_TYPES = {"ОРИГИНАЛЬНЫЕ"}
+TIS_ALLOWED_GROUP_TYPES = {"РАСХОДНЫЕ МАТЕРИАЛЫ"}
+TIS_ALLOWED_BRAND_KEYS = {
+    "AVISION", "BROTHER", "CANON", "FPLUSIMAGING", "HP", "KONICAMINOLTA", "KYOCERAMITA",
+    "OKI", "RICOH", "RICOHPRO", "SHARP", "XEROX", "КАТЮША"
+}
 MERLION_ALLOWED_PRODUCT_TYPES = {
     "ДРАМ-КАРТРИДЖИ",
     "ЛЕНТОЧНЫЕ КАРТРИДЖИ",
@@ -156,6 +161,13 @@ RESOURCE_BRAND_KEY_ALIASES = {
     "HPINC": "HP",
     "KONICAMINOLTA": "KONICAMINOLTA",
     "KONICAMINOLTAINC": "KONICAMINOLTA",
+    "KYOCERA": "KYOCERAMITA",
+    "KYOCERAMITA": "KYOCERAMITA",
+    "RICOH": "RICOH",
+    "RICOHPRO": "RICOHPRO",
+    "RICOHPRODUCTIONPRINT": "RICOHPRO",
+    "FPLUSIMAGING": "FPLUSIMAGING",
+    "FPLUS": "FPLUSIMAGING",
     "XEROXCORPORATION": "XEROX",
 }
 
@@ -303,6 +315,8 @@ def init_state() -> None:
         "ocs_name": "ещё не загружен",
         "merlion_df": None,
         "merlion_name": "ещё не загружен",
+        "tis_df": None,
+        "tis_name": "ещё не загружен",
         "search_input": "",
         "submitted_query": "",
         "last_result": None,
@@ -456,6 +470,15 @@ def is_merlion_allowed_brand(value: object) -> bool:
     return bool(key) and key in MERLION_ALLOWED_BRAND_KEYS
 
 
+def is_tis_allowed_type(value: object) -> bool:
+    return contains_text(value) in TIS_ALLOWED_GROUP_TYPES
+
+
+def is_tis_allowed_brand(value: object) -> bool:
+    key = canonical_brand_key(value)
+    return bool(key) and key in TIS_ALLOWED_BRAND_KEYS
+
+
 def resource_brand_filter(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df.iloc[0:0].copy()
@@ -490,6 +513,17 @@ def merlion_brand_filter(df: pd.DataFrame) -> pd.DataFrame:
         out = out[out["product_type"].apply(is_merlion_allowed_type)].copy()
     if "brand" in out.columns:
         out = out[out["brand"].apply(is_merlion_allowed_brand)].copy()
+    return out.reset_index(drop=True)
+
+
+def tis_brand_filter(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df.iloc[0:0].copy()
+    out = df.copy()
+    if "product_type" in out.columns:
+        out = out[out["product_type"].apply(is_tis_allowed_type)].copy()
+    if "brand" in out.columns:
+        out = out[out["brand"].apply(is_tis_allowed_brand)].copy()
     return out.reset_index(drop=True)
 
 
@@ -542,45 +576,14 @@ def row_catalog_search_codes(row: pd.Series | dict[str, Any]) -> list[str]:
     return build_catalog_code_list(row.get("article", ""), row.get("name", ""))
 
 
-def article_family_core(value: object) -> str:
-    norm = normalize_article(value)
-    if not norm:
-        return ""
-    m = re.match(r"^(.*?\d)", norm)
-    return m.group(1) if m else norm
-
-
-def same_article_family_code(a: object, b: object) -> bool:
-    a_norm = normalize_article(a)
-    b_norm = normalize_article(b)
-    if not a_norm or not b_norm:
-        return False
-    if a_norm == b_norm:
-        return True
-    if a_norm.endswith("P") and a_norm[:-1] == b_norm:
-        return True
-    if b_norm.endswith("P") and b_norm[:-1] == a_norm:
-        return True
-    a_core = article_family_core(a_norm)
-    b_core = article_family_core(b_norm)
-    return bool(a_core and b_core and a_core == b_core)
-
-
 def row_catalog_compare_codes(row: pd.Series | dict[str, Any], token: str = "") -> list[str]:
     article = row.get("article", "")
     name = row.get("name", "")
     brand = row.get("brand", "")
     token_norm = normalize_article(token)
-    base_norm = token_norm or normalize_article(article)
     if is_negative_substitute_text(article, name, brand):
         return unique_norm_codes([article, token_norm])
-    all_codes = row_catalog_search_codes(row)
-    if not base_norm:
-        return unique_norm_codes([token_norm, *all_codes])
-    strong_codes = [code for code in all_codes if same_article_family_code(code, base_norm)]
-    if strong_codes:
-        return unique_norm_codes([base_norm, token_norm, *strong_codes])
-    return unique_norm_codes([token_norm, *all_codes])
+    return unique_norm_codes([token_norm, *row_catalog_search_codes(row)])
 
 
 def row_has_negative_series_markers(row: pd.Series) -> bool:
@@ -1418,6 +1421,16 @@ def parse_merlion_qty(value: Any) -> float:
     return 0.0
 
 
+def parse_tis_qty(value: Any) -> float:
+    text = normalize_text(value)
+    if not text:
+        return 0.0
+    try:
+        return max(0.0, float(str(value).replace(" ", "").replace(",", ".")))
+    except Exception:
+        return 0.0
+
+
 def standardize_distributor_result(data: pd.DataFrame, distributor: str) -> pd.DataFrame:
     data = data.copy()
     if "alt_article" not in data.columns:
@@ -1554,8 +1567,49 @@ def load_merlion_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     return data.reset_index(drop=True)
 
 
+@st.cache_data(show_spinner=False)
+def load_tis_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
+    sale_df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Распродажа", header=5).dropna(how="all")
+    std_df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="Стандарт", header=5).dropna(how="all")
+
+    def _prepare(df: pd.DataFrame, source_sheet: str, priority: int) -> pd.DataFrame:
+        data = pd.DataFrame()
+        data["article"] = first_existing_series(df, ["Артикул (код товара)", "Артикул"], "").map(normalize_text)
+        data["alt_article"] = first_existing_series(df, ["Альтернативные артикулы"], "").map(normalize_text)
+        data["name"] = first_existing_series(df, ["Наименование"], "").map(normalize_text)
+        data["brand"] = first_existing_series(df, ["Вендор", "Производитель"], "").combine(first_existing_series(df, ["Наименование"], ""), lambda b, n: normalize_or_infer_brand(b, n))
+        data["product_type"] = first_existing_series(df, ["Группа"], "").map(normalize_text)
+        data["group2"] = first_existing_series(df, ["Подгруппа"], "").map(normalize_text)
+        data["price"] = pd.to_numeric(first_existing_series(df, ["Цена"], 0), errors="coerce")
+        data["free_qty"] = first_existing_series(df, ["В наличии"], 0).map(parse_tis_qty)
+        data["quality_flags"] = collect_quality_flag_text(df)
+        data = standardize_distributor_result(data, "Тис")
+        data["sheet_name"] = source_sheet
+        data["sheet_priority"] = priority
+        data["tis_type_ok"] = data["product_type"].apply(is_tis_allowed_type)
+        data["tis_brand_ok"] = data["brand"].apply(is_tis_allowed_brand)
+        data["is_original"] = ~data.apply(lambda r: is_negative_substitute_text(r["article"], r["alt_article"], r["name"], r["brand"], r.get("group2", "")), axis=1)
+        data["is_good_offer"] = (
+            data["tis_type_ok"]
+            & data["tis_brand_ok"]
+            & data["is_original"]
+            & ~data.apply(row_has_bad_offer_markers, axis=1)
+            & ~data.apply(row_explicitly_flagged_bad, axis=1)
+        )
+        data = data[data["tis_type_ok"] & data["tis_brand_ok"]].copy()
+        data = data[data["free_qty"] > 0].copy()
+        return data.reset_index(drop=True)
+
+    sale_prepared = _prepare(sale_df, "Распродажа", 0)
+    std_prepared = _prepare(std_df, "Стандарт", 1)
+    combined = pd.concat([sale_prepared, std_prepared], ignore_index=True)
+    if combined.empty:
+        return combined
+    return combined.reset_index(drop=True)
+
+
 def distributor_sources_ready() -> bool:
-    for key in ["resource_df", "ocs_df", "merlion_df"]:
+    for key in ["resource_df", "ocs_df", "merlion_df", "tis_df"]:
         df = st.session_state.get(key)
         if isinstance(df, pd.DataFrame) and not df.empty:
             return True
@@ -1638,8 +1692,10 @@ def resource_search_candidates(df: pd.DataFrame, token_norm: str, own_article_no
 
     name_code = working[working["name_code_list"].apply(lambda codes: any(code in codes for code in search_codes) if isinstance(codes, list) else False)].copy()
     if not name_code.empty:
-        name_code["_match_rank"] = 3
-        return name_code
+        name_code = name_code[name_code.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
+        if not name_code.empty:
+            name_code["_match_rank"] = 3
+            return name_code
 
     return working.iloc[0:0].copy()
 
@@ -1682,8 +1738,10 @@ def ocs_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: s
 
     name_code = working[working["name_code_list"].apply(lambda codes: any(code in codes for code in search_codes) if isinstance(codes, list) else False)].copy()
     if not name_code.empty:
-        name_code["_match_rank"] = 3
-        return name_code
+        name_code = name_code[name_code.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
+        if not name_code.empty:
+            name_code["_match_rank"] = 3
+            return name_code
 
     return working.iloc[0:0].copy()
 
@@ -1734,6 +1792,54 @@ def merlion_search_candidates(df: pd.DataFrame, token_norm: str, own_article_nor
     return working.iloc[0:0].copy()
 
 
+def tis_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str, own_codes: Optional[list[str]] = None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df.iloc[0:0].copy()
+
+    working = df.copy()
+    if "is_good_offer" in working.columns:
+        working = working[working["is_good_offer"] == True].copy()
+    if working.empty:
+        return working
+    working = tis_brand_filter(working)
+    if working.empty:
+        return working
+
+    search_codes = unique_norm_codes([token_norm, own_article_norm, *(own_codes or [])])
+    if not search_codes:
+        return working.iloc[0:0].copy()
+
+    def _pick_with_sheet_priority(found: pd.DataFrame, rank: int) -> pd.DataFrame:
+        if found.empty:
+            return found
+        found = found.sort_values(["sheet_priority", "price", "free_qty", "article_norm"], ascending=[True, True, False, True]).copy()
+        best_priority = found["sheet_priority"].min()
+        found = found[found["sheet_priority"] == best_priority].copy()
+        found["_match_rank"] = rank
+        return found
+
+    primary_exact = working[working["article_norm"].isin(search_codes)].copy()
+    primary_exact = _pick_with_sheet_priority(primary_exact, 0)
+    if not primary_exact.empty:
+        return primary_exact
+
+    alt_exact = working[working["alt_article_norm"].isin(search_codes)].copy()
+    if not alt_exact.empty:
+        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, next((c for c in search_codes if normalize_article(r.get("alt_article", "")) == c), token_norm or own_article_norm)), axis=1)].copy()
+        alt_exact = _pick_with_sheet_priority(alt_exact, 1)
+        if not alt_exact.empty:
+            return alt_exact
+
+    linked = working[working["name_code_list"].apply(lambda codes: any(code in codes for code in search_codes) if isinstance(codes, list) else False)].copy()
+    if not linked.empty:
+        linked = linked[linked.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
+        linked = _pick_with_sheet_priority(linked, 2)
+        if not linked.empty:
+            return linked
+
+    return working.iloc[0:0].copy()
+
+
 def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str, own_codes: Optional[list[str]] = None) -> pd.DataFrame:
     if df is None or df.empty:
         return df.iloc[0:0].copy()
@@ -1749,6 +1855,8 @@ def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article
         return ocs_search_candidates(df, token_norm, own_article_norm, search_mode, own_codes=own_codes)
     if distributor_name == "Мерлион":
         return merlion_search_candidates(df, token_norm, own_article_norm, search_mode, own_codes=own_codes)
+    if distributor_name == "Тис":
+        return tis_search_candidates(df, token_norm, own_article_norm, search_mode, own_codes=own_codes)
 
     working = df.copy()
     if "is_good_offer" in working.columns:
@@ -1858,7 +1966,7 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
 
 def get_distributor_offers_for_choice(choice: dict[str, Any], token: str, search_mode: str, min_qty: float = 1.0) -> list[dict[str, Any]]:
     offers: list[dict[str, Any]] = []
-    for state_key in ["resource_df", "ocs_df", "merlion_df"]:
+    for state_key in ["resource_df", "ocs_df", "merlion_df", "tis_df"]:
         df = st.session_state.get(state_key)
         if df is None or df.empty:
             continue
@@ -1927,7 +2035,7 @@ def build_all_distributor_prices_df(result_df: pd.DataFrame, search_mode: str, m
         return pd.DataFrame()
 
     connected_sources = []
-    for state_key, label in [("resource_df", "Ресурс"), ("ocs_df", "OCS"), ("merlion_df", "Мерлион")]:
+    for state_key, label in [("resource_df", "Ресурс"), ("ocs_df", "OCS"), ("merlion_df", "Мерлион"), ("tis_df", "Тис")]:
         df = st.session_state.get(state_key)
         if df is not None and not df.empty:
             connected_sources.append(label)
@@ -2041,7 +2149,7 @@ def render_results_insight_dashboard(result_df: pd.DataFrame, compare_map: dict[
     avg_gain = 0.0
     gains: list[float] = []
     connected = []
-    for key, label in [("resource_df", "Ресурс"), ("ocs_df", "OCS"), ("merlion_df", "Мерлион")]:
+    for key, label in [("resource_df", "Ресурс"), ("ocs_df", "OCS"), ("merlion_df", "Мерлион"), ("tis_df", "Тис")]:
         df = st.session_state.get(key)
         if isinstance(df, pd.DataFrame) and not df.empty:
             connected.append(label)
@@ -2464,6 +2572,7 @@ def build_display_df(df: pd.DataFrame, price_mode: str, round100: bool, custom_d
         resource_dbg = []
         ocs_dbg = []
         merlion_dbg = []
+        tis_dbg = []
 
         def offer_debug_text(offer: dict[str, Any] | None) -> str:
             if not offer:
@@ -2495,6 +2604,7 @@ def build_display_df(df: pd.DataFrame, price_mode: str, round100: bool, custom_d
             resource_dbg.append(offer_debug_text(get_best_distributor_match_for_source(st.session_state.get("resource_df"), choice, token, search_mode, min_qty=min_qty)))
             ocs_dbg.append(offer_debug_text(get_best_distributor_match_for_source(st.session_state.get("ocs_df"), choice, token, search_mode, min_qty=min_qty)))
             merlion_dbg.append(offer_debug_text(get_best_distributor_match_for_source(st.session_state.get("merlion_df"), choice, token, search_mode, min_qty=min_qty)))
+            tis_dbg.append(offer_debug_text(get_best_distributor_match_for_source(st.session_state.get("tis_df"), choice, token, search_mode, min_qty=min_qty)))
 
         display_df["Лучший дистрибьютер"] = best_dist
         display_df["Цена дистрибьютора"] = best_price
@@ -2504,6 +2614,7 @@ def build_display_df(df: pd.DataFrame, price_mode: str, round100: bool, custom_d
         display_df["Ресурс debug"] = resource_dbg
         display_df["OCS debug"] = ocs_dbg
         display_df["Мерлион debug"] = merlion_dbg
+        display_df["Тис debug"] = tis_dbg
     return display_df
 
 
@@ -2983,7 +3094,7 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    render_sidebar_card_header("Дистрибьютеры", "🏷️", "Здесь подключаются прайсы Ресурс, OCS и Мерлион. Блок сравнивает только нормальные оригинальные позиции и только то, что есть в наличии.")
+    render_sidebar_card_header("Дистрибьютеры", "🏷️", "Здесь подключаются прайсы Ресурс, OCS, Мерлион и Тис. Блок сравнивает только нормальные оригинальные позиции и только то, что есть в наличии.")
     st.markdown('<div class="sidebar-card-note">Добавлен перенос логики сравнения цен: только оригиналы, только хорошие позиции, только товар в наличии.</div>', unsafe_allow_html=True)
     resource_uploaded = st.file_uploader("Ресурс", type=["xlsx", "xlsm"], key="resource_uploader")
     if resource_uploaded is not None:
@@ -3011,6 +3122,16 @@ with st.sidebar:
         except Exception as exc:
             st.error(f"Ошибка файла Мерлион: {exc}")
     st.markdown(f'<div class="sidebar-status">Мерлион: {html.escape(st.session_state.get("merlion_name", "ещё не загружен"))}</div>', unsafe_allow_html=True)
+
+    tis_uploaded = st.file_uploader("Тис", type=["xlsx", "xlsm"], key="tis_uploader")
+    if tis_uploaded is not None:
+        try:
+            st.session_state.tis_df = load_tis_file(tis_uploaded.name, tis_uploaded.getvalue())
+            st.session_state.tis_name = tis_uploaded.name
+        except Exception as exc:
+            st.error(f"Ошибка файла Тис: {exc}")
+    st.markdown(f'<div class="sidebar-status">Тис: {html.escape(st.session_state.get("tis_name", "ещё не загружен"))}</div>', unsafe_allow_html=True)
+
     st.number_input("Порог отчёта, %", min_value=0.0, max_value=95.0, step=1.0, key="distributor_threshold")
     st.number_input("Мин. остаток у дистрибьютора", min_value=1.0, max_value=999999.0, step=1.0, key="distributor_min_qty")
     st.markdown('<div class="sidebar-mini">Если у поставщика осталась 1 шт., можно поднять минимальный остаток и убрать такие хвосты из сравнения.</div>', unsafe_allow_html=True)
@@ -3169,6 +3290,8 @@ else:
             chips.append("<span class=\"mini-chip\">OCS подключён</span>")
         if st.session_state.get("merlion_df") is not None:
             chips.append("<span class=\"mini-chip\">Мерлион подключён</span>")
+        if st.session_state.get("tis_df") is not None:
+            chips.append("<span class=\"mini-chip\">Тис подключён</span>")
         st.markdown("".join(chips), unsafe_allow_html=True)
         st.caption(f"Для найденных позиций проверяю только оригиналы, только хорошие предложения и только остатки от {fmt_qty(min_dist_qty)} шт. Где цена поставщика лучше — показываю дистрибьютора, цену, остаток и выгоду.")
         st.metric("Где кто-то лучше нас", better_rows)
