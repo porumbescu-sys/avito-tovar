@@ -161,6 +161,11 @@ RESOURCE_ALLOWED_BRAND_KEYS = {
 }
 OCS_ALLOWED_BRAND_KEYS = set(RESOURCE_ALLOWED_BRAND_KEYS)
 MERLION_ALLOWED_BRAND_KEYS = set(RESOURCE_ALLOWED_BRAND_KEYS)
+MERLION_PANTUM_EXTRA_ZERO_CODES = {
+    "DL420P", "DL5120P", "DLR5220",
+    "TL420HP", "TL420XP", "TL5120HP", "TL5120P", "TL5120XP",
+}
+
 RESOURCE_BRAND_KEY_ALIASES = {
     "HEWLETTPACKARD": "HP",
     "HEWLETTPACKARDINC": "HP",
@@ -1538,6 +1543,34 @@ def parse_ocs_qty(value: Any) -> float:
     return 0.0
 
 
+def merlion_pantum_price_should_divide_by_10(article: object, alt_article: object, name: object, brand: object, price: object) -> bool:
+    try:
+        price_val = float(price)
+    except Exception:
+        return False
+    if price_val < 10000:
+        return False
+    # Подозрительные позиции: только Pantum-расходка из известного списка, где в Merlion в рублевой цене лишний 0.
+    brand_key = canonical_brand_key(brand or name)
+    if brand_key != "PANTUM":
+        return False
+    code_pool = set(unique_norm_codes([article, alt_article]))
+    if not code_pool & MERLION_PANTUM_EXTRA_ZERO_CODES:
+        return False
+    # Делим только круглые цены вида 51000 / 73500 / 122000, чтобы не трогать нормальные 3700 / 5100 / 5044.
+    return abs(price_val - round(price_val)) < 1e-9 and int(round(price_val)) % 100 == 0
+
+
+def normalize_merlion_price(article: object, alt_article: object, name: object, brand: object, price: object) -> float:
+    try:
+        price_val = float(price)
+    except Exception:
+        return float('nan')
+    if merlion_pantum_price_should_divide_by_10(article, alt_article, name, brand, price_val):
+        return price_val / 10.0
+    return price_val
+
+
 def parse_merlion_qty(value: Any) -> float:
     text = compact_text(value)
     if not text:
@@ -1677,6 +1710,7 @@ def load_merlion_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     data["group_level2"] = first_existing_series(df, ["Группа 2", "Группа2", "Подгруппа", "Категория"], "").map(normalize_text)
     data["product_type"] = first_existing_series(df, ["Группа 3", "Группа3", "Вид товара", "Подкатегория"], "").map(normalize_text)
     data["price"] = pd.to_numeric(first_existing_series(df, ["Цена(руб)", "Цена"], 0), errors="coerce")
+    data["price"] = data.apply(lambda r: normalize_merlion_price(r.get("article", ""), r.get("alt_article", ""), r.get("name", ""), r.get("brand", ""), r.get("price", 0)), axis=1)
     data["free_qty"] = first_existing_series(df, ["Доступно", "Наличие"], 0).map(parse_merlion_qty)
     data["quality_flags"] = collect_quality_flag_text(df)
     data = standardize_distributor_result(data, "Мерлион")
