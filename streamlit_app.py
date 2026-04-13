@@ -597,6 +597,26 @@ def extract_article_candidates_from_text(text: object) -> list[str]:
 
 
 
+
+def extract_alt_article_candidates(text: object) -> list[str]:
+    raw = normalize_text(text)
+    if not raw:
+        return []
+    parts = [p.strip() for p in re.split(r"[;,|]+", raw) if normalize_text(p)]
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        norm = normalize_article(part)
+        if not is_candidate_article_norm(norm) or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+    if not out:
+        out = extract_article_candidates_from_text(raw)
+    return out
+
+
+
 def unique_norm_codes(items: list[object]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
