@@ -289,12 +289,17 @@ def is_confident_distributor_row_for_choice(row: pd.Series, choice: dict[str, An
     row_alt_codes = set(unique_norm_codes(row.get("alt_code_list", []) or []))
 
     # Сильные совпадения по коду не должны отрезаться эвристикой по типу товара.
+    dist_name = str(row.get("distributor", "") or "")
     if row_article_norm in code_pool:
         return True
     if row_alt_norm in code_pool:
+        if dist_name == "Тис":
+            return True
         return is_confident_alt_exact_match(row, row_alt_norm)
     if row_alt_codes & code_pool:
         matched = next(iter(row_alt_codes & code_pool))
+        if dist_name == "Тис":
+            return True
         return is_confident_alt_exact_match(row, matched)
     for code in code_pool:
         if pantum_safe_p_alias_match(code, row, own_brand=own_brand):
@@ -1905,17 +1910,8 @@ def tis_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: s
 
     alt_exact = working[row_alt_exact_match_mask(working, search_codes)].copy()
     if not alt_exact.empty:
-        def _matched_alt_code_tis(r: pd.Series) -> str:
-            alt_codes = r.get("alt_code_list", []) or []
-            for code in search_codes:
-                if code in alt_codes:
-                    return code
-            alt_norm = normalize_article(r.get("alt_article", ""))
-            for code in search_codes:
-                if alt_norm == code:
-                    return code
-            return token_norm or own_article_norm
-        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, _matched_alt_code_tis(r)), axis=1)].copy()
+        # Для Тис точное совпадение в "Альтернативных артикулах" считаем сильным и валидным.
+        # Здесь не нужна дополнительная эвристика по типу товара: пользователь явно ищет точный код.
         alt_exact = _pick_with_sheet_priority(alt_exact, 1)
         if not alt_exact.empty:
             return alt_exact
