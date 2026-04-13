@@ -682,6 +682,48 @@ def split_article_family_suffix(article_norm: str) -> tuple[str, str]:
     return article_norm, ""
 
 
+def build_strong_search_codes(token_norm: str, own_article_norm: str, own_codes: Optional[list[str]] = None) -> list[str]:
+    base_codes = unique_norm_codes([token_norm, own_article_norm, *((own_codes or []))])
+    anchor = normalize_article(token_norm) or normalize_article(own_article_norm)
+    if not base_codes:
+        return []
+    if not anchor:
+        return base_codes
+
+    anchor_family, _ = split_article_family_suffix(anchor)
+    strong: list[str] = []
+    seen: set[str] = set()
+
+    def _push(code: str) -> None:
+        code = normalize_article(code)
+        if not code or code in seen:
+            return
+        seen.add(code)
+        strong.append(code)
+
+    # Always keep direct token/article.
+    _push(token_norm)
+    _push(own_article_norm)
+
+    for code in base_codes:
+        code_norm = normalize_article(code)
+        if not code_norm:
+            continue
+        if code_norm == anchor:
+            _push(code_norm)
+            continue
+        # Avoid weak noise from capacities/model numbers when anchor is alphanumeric.
+        if anchor.isdigit():
+            if code_norm == anchor:
+                _push(code_norm)
+            continue
+        code_family, _ = split_article_family_suffix(code_norm)
+        if code_family == anchor_family:
+            _push(code_norm)
+
+    return strong if strong else base_codes
+
+
 def natural_chunks(value: str) -> list[object]:
     parts = re.split(r"(\d+)", value)
     result: list[object] = []
@@ -1772,7 +1814,7 @@ def resource_search_candidates(df: pd.DataFrame, token_norm: str, own_article_no
     if working.empty:
         return working
 
-    search_codes = unique_norm_codes([token_norm, own_article_norm, *(own_codes or [])])
+    search_codes = build_strong_search_codes(token_norm, own_article_norm, own_codes)
     if not search_codes:
         return working.iloc[0:0].copy()
 
@@ -1818,7 +1860,7 @@ def ocs_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: s
     if working.empty:
         return working
 
-    search_codes = unique_norm_codes([token_norm, own_article_norm, *(own_codes or [])])
+    search_codes = build_strong_search_codes(token_norm, own_article_norm, own_codes)
     if not search_codes:
         return working.iloc[0:0].copy()
 
@@ -1864,7 +1906,7 @@ def merlion_search_candidates(df: pd.DataFrame, token_norm: str, own_article_nor
     if working.empty:
         return working
 
-    search_codes = unique_norm_codes([token_norm, own_article_norm, *(own_codes or [])])
+    search_codes = build_strong_search_codes(token_norm, own_article_norm, own_codes)
     if not search_codes:
         return working.iloc[0:0].copy()
 
@@ -1906,7 +1948,7 @@ def tis_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: s
     if working.empty:
         return working
 
-    search_codes = unique_norm_codes([token_norm, own_article_norm, *(own_codes or [])])
+    search_codes = build_strong_search_codes(token_norm, own_article_norm, own_codes)
     if not search_codes:
         return working.iloc[0:0].copy()
 
@@ -1966,7 +2008,7 @@ def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article
     if working.empty:
         return working
 
-    search_codes = unique_norm_codes([token_norm, own_article_norm, *(own_codes or [])])
+    search_codes = build_strong_search_codes(token_norm, own_article_norm, own_codes)
     if not search_codes:
         return working.iloc[0:0].copy()
 
@@ -2084,7 +2126,7 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
             return None
         cand = orig
     dist_name = str(df["distributor"].iloc[0]) if "distributor" in df.columns and not df.empty else ""
-    direct_code_set = set(unique_norm_codes([token_norm, own_article_norm, *own_compare_codes]))
+    direct_code_set = set(build_strong_search_codes(token_norm, own_article_norm, own_compare_codes))
     if dist_name in {"Тис", "Мерлион"}:
         # Для Тис и Мерлион точные попадания по коду / альтернативному коду / коду из названия считаем валидными сразу.
         direct_mask = (
