@@ -366,6 +366,29 @@ def normalize_article(value: object) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", text).upper()
 
 
+def safe_float(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return float(default)
+    try:
+        if pd.isna(value):
+            return float(default)
+    except Exception:
+        pass
+    if isinstance(value, str):
+        txt = normalize_text(value)
+        if not txt:
+            return float(default)
+        txt = txt.replace(" ", "").replace(",", ".")
+        try:
+            return float(txt)
+        except Exception:
+            return float(default)
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
 def contains_text(value: object) -> str:
     return normalize_text(value).upper()
 
@@ -1905,7 +1928,7 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
     if df is None or df.empty:
         return None
 
-    own_price = float(choice.get("sale_price", 0) or 0)
+    own_price = safe_float(choice.get("sale_price", 0), 0.0)
     own_brand = str(choice.get("brand", "") or "")
     own_article_norm = normalize_article(choice.get("article", ""))
     token_norm = normalize_article(token)
@@ -1944,7 +1967,7 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
         "article": str(row.get("article", "")),
         "name": str(row.get("name", "")),
         "brand": str(row.get("brand", "")),
-        "free_qty": float(row.get("free_qty", 0) or 0),
+        "free_qty": safe_float(row.get("free_qty", 0), 0.0),
         "match_rank": int(row.get("_match_rank", 99) or 99),
         "source_sheet": str(row.get("sheet_name", "") or ""),
     }
@@ -1974,16 +1997,16 @@ def get_distributor_offers_for_choice(choice: dict[str, Any], token: str, search
         offer = get_best_distributor_match_for_source(df, choice, token, search_mode, min_qty=min_qty)
         if offer:
             offers.append(offer)
-    offers.sort(key=lambda x: (float(x.get("price", 0) or 0), -float(x.get("free_qty", 0) or 0), str(x.get("distributor", ""))))
+    offers.sort(key=lambda x: (safe_float(x.get("price", 0), 0.0), -safe_float(x.get("free_qty", 0), 0.0), str(x.get("distributor", ""))))
     return offers
 
 
 
 def find_best_distributor_offer_for_choice(choice: dict[str, Any], token: str, search_mode: str, min_qty: float = 1.0) -> dict[str, Any] | None:
-    own_price = float(choice.get("sale_price", 0) or 0)
+    own_price = safe_float(choice.get("sale_price", 0), 0.0)
     best = None
     for offer in get_distributor_offers_for_choice(choice, token, search_mode, min_qty=min_qty):
-        price = float(offer.get("price", 0) or 0)
+        price = safe_float(offer.get("price", 0), 0.0)
         if own_price > 0 and price >= own_price:
             continue
         if best is None or price < float(best["price"]):
@@ -2005,11 +2028,11 @@ def build_distributor_compare(result_df: pd.DataFrame, search_mode: str, min_qty
             "article": row.get("article", ""),
             "name": row.get("name", ""),
             "brand": row.get("brand", ""),
-            "sale_price": float(row.get("sale_price", 0) or 0),
+            "sale_price": safe_float(row.get("sale_price", 0), 0.0),
             "row_key": row_key,
         }
         best_offer = find_best_distributor_offer_for_choice(choice, str(row.get("article", "")), search_mode, min_qty=min_qty)
-        sale_price = float(row.get("sale_price", 0) or 0)
+        sale_price = safe_float(row.get("sale_price", 0), 0.0)
         out.append({
             "row_key": row_key,
             "article": str(row.get("article", "")),
@@ -2117,9 +2140,9 @@ def build_all_distributor_prices_df(result_df: pd.DataFrame, search_mode: str, m
         is_external = bool(row.get("_external_only", False))
 
         sale_price_raw = row.get("sale_price", pd.NA)
-        own_price = None if pd.isna(sale_price_raw) else float(sale_price_raw or 0)
+        own_price = None if pd.isna(sale_price_raw) else safe_float(sale_price_raw, 0.0)
         free_qty_raw = row.get("free_qty", pd.NA)
-        own_qty = None if pd.isna(free_qty_raw) else float(free_qty_raw or 0)
+        own_qty = None if pd.isna(free_qty_raw) else safe_float(free_qty_raw, 0.0)
         selected_price = None
         if price_mode and own_price is not None:
             selected_price = get_selected_price_raw(row, str(price_mode or "-12%"), bool(round100), float(custom_discount))
@@ -2183,10 +2206,10 @@ def build_all_distributor_prices_df(result_df: pd.DataFrame, search_mode: str, m
                     "Наша цена": (own_price if own_price is not None else pd.NA),
                     "Наша цена выбранная": (selected_price if selected_price is not None else pd.NA),
                     "Наш остаток": (own_qty if own_qty is not None else pd.NA),
-                    "Цена": float(offer.get("price", 0) or 0),
-                    "Остаток": float(offer.get("free_qty", 0) or 0),
-                    "Разница к нам, руб": (float(offer.get("delta", 0) or 0) if own_price is not None and own_price > 0 else pd.NA),
-                    "Разница к нам, %": (round(float(offer.get("delta_percent", 0) or 0), 2) if own_price is not None and own_price > 0 else pd.NA),
+                    "Цена": safe_float(offer.get("price", 0), 0.0),
+                    "Остаток": safe_float(offer.get("free_qty", 0), 0.0),
+                    "Разница к нам, руб": (safe_float(offer.get("delta", 0), 0.0) if own_price is not None and own_price > 0 else pd.NA),
+                    "Разница к нам, %": (round(safe_float(offer.get("delta_percent", 0), 0.0), 2) if own_price is not None and own_price > 0 else pd.NA),
                     "Статус": (str(offer.get("status", "найдено")) if own_price is not None and own_price > 0 else "найдено у дистрибьютора"),
                     "Артикул источника": str(offer.get("article", "") or ""),
                     "Название источника": str(offer.get("name", "") or ""),
@@ -2263,7 +2286,7 @@ def render_results_insight_dashboard(result_df: pd.DataFrame, compare_map: dict[
         if offer:
             better_rows += 1
             try:
-                gains.append(float(offer.get("delta_percent", 0) or 0))
+                gains.append(safe_float(offer.get("delta_percent", 0), 0.0))
             except Exception:
                 pass
     if gains:
@@ -2300,8 +2323,8 @@ def build_product_analysis_df(result_df: pd.DataFrame, search_mode: str, min_qty
         article = str(row.get("article", "") or "")
         name = str(row.get("name", "") or "")
         brand = str(row.get("brand", "") or "")
-        own_qty = float(row.get("free_qty", 0) or 0)
-        own_price = float(row.get("sale_price", 0) or 0)
+        own_qty = safe_float(row.get("free_qty", 0), 0.0)
+        own_price = safe_float(row.get("sale_price", 0), 0.0)
         choice = {
             "article": article,
             "name": name,
@@ -2318,9 +2341,9 @@ def build_product_analysis_df(result_df: pd.DataFrame, search_mode: str, min_qty
             "Бренд": brand,
             "КОЛ.": own_qty,
             "тек прод": own_price,
-            "дистр": float(best_offer.get("price", 0) or 0) if best_offer else None,
+            "дистр": safe_float(best_offer.get("price", 0), 0.0) if best_offer else None,
             "Дистрибьютор": str(best_offer.get("distributor", "") or "") if best_offer else "",
-            "Остаток дистрибьютора": float(best_offer.get("free_qty", 0) or 0) if best_offer else None,
+            "Остаток дистрибьютора": safe_float(best_offer.get("free_qty", 0), 0.0) if best_offer else None,
             "Артикул источника": str(best_offer.get("article", "") or "") if best_offer else "",
             "Название источника": str(best_offer.get("name", "") or "") if best_offer else "",
         })
@@ -2579,8 +2602,8 @@ def build_full_distributor_report(df: pd.DataFrame, threshold_percent: float, se
         return pd.DataFrame()
 
     for row in df.itertuples(index=False):
-        sale_price = float(getattr(row, "sale_price", 0) or 0)
-        own_free_qty = float(getattr(row, "free_qty", 0) or 0)
+        sale_price = safe_float(getattr(row, "sale_price", 0), 0.0)
+        own_free_qty = safe_float(getattr(row, "free_qty", 0), 0.0)
         if sale_price <= 0 or own_free_qty <= 0:
             continue
         article = str(getattr(row, "article", "") or "")
@@ -2603,7 +2626,7 @@ def build_full_distributor_report(df: pd.DataFrame, threshold_percent: float, se
             "Артикул": article,
             "Название": name,
             "Производитель": brand,
-            "Наш остаток": float(getattr(row, "free_qty", 0) or 0),
+            "Наш остаток": safe_float(getattr(row, "free_qty", 0), 0.0),
             "Наша цена": sale_price,
             "Лучший дистрибьютер": str(best_offer.get("distributor", "")),
             "Цена дистрибьютора": float(best_offer["price"]),
@@ -2644,8 +2667,8 @@ def get_series_candidates(df: pd.DataFrame, raw_query: str, series_mode: str = "
             "article_norm": str(row.get("article_norm", "")),
             "name": str(row.get("name", "")),
             "brand": str(row.get("brand", "")),
-            "free_qty": float(row.get("free_qty", 0) or 0),
-            "sale_price": float(row.get("sale_price", 0) or 0),
+            "free_qty": safe_float(row.get("free_qty", 0), 0.0),
+            "sale_price": safe_float(row.get("sale_price", 0), 0.0),
             "is_original": not row_has_negative_series_markers(row),
         }
         candidates_by_key[candidate["article_norm"]] = candidate
@@ -2657,8 +2680,8 @@ def get_series_candidates(df: pd.DataFrame, raw_query: str, series_mode: str = "
             "article_norm": str(row.get("article_norm", "")),
             "name": str(row.get("name", "")),
             "brand": str(row.get("brand", "")),
-            "free_qty": float(row.get("free_qty", 0) or 0),
-            "sale_price": float(row.get("sale_price", 0) or 0),
+            "free_qty": safe_float(row.get("free_qty", 0), 0.0),
+            "sale_price": safe_float(row.get("sale_price", 0), 0.0),
             "is_original": not row_has_negative_series_markers(row),
         }
         if candidate["article_norm"] not in candidates_by_key:
@@ -2909,7 +2932,7 @@ def render_results_table(df: pd.DataFrame, price_mode: str, round100: bool, cust
             badge_html = "<div class='match-badge match-badge-similar'>Похожее совпадение</div>"
 
         if best_offer:
-            qty_class = "qty-low" if float(best_offer.get("free_qty", 0) or 0) <= 1 else "qty-ok"
+            qty_class = "qty-low" if safe_float(best_offer.get("free_qty", 0), 0.0) <= 1 else "qty-ok"
             compare_html = f"""
             <div class='best-box'>
               <div class='best-top'>
