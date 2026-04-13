@@ -492,11 +492,17 @@ def is_ocs_allowed_brand(value: object) -> bool:
 
 
 def is_merlion_allowed_root(value: object) -> bool:
-    return contains_text(value) in MERLION_ALLOWED_GROUP1_TYPES
+    text = contains_text(value)
+    if text in MERLION_ALLOWED_GROUP1_TYPES:
+        return True
+    return "РАСХОДН" in text
 
 
 def is_merlion_allowed_group2(value: object) -> bool:
-    return contains_text(value) in MERLION_ALLOWED_GROUP2_TYPES
+    text = contains_text(value)
+    if text in MERLION_ALLOWED_GROUP2_TYPES:
+        return True
+    return "ОРИГИН" in text
 
 
 def is_merlion_allowed_type(value: object) -> bool:
@@ -1676,7 +1682,7 @@ def load_merlion_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     data = standardize_distributor_result(data, "Мерлион")
     data["merlion_root_ok"] = data["group_root"].apply(is_merlion_allowed_root)
     data["merlion_group2_ok"] = data["group_level2"].apply(is_merlion_allowed_group2)
-    data["merlion_type_ok"] = data["product_type"].apply(is_merlion_allowed_type)
+    data["merlion_type_ok"] = data.apply(lambda r: is_merlion_allowed_type(r.get("product_type", "")) or is_merlion_allowed_type(r.get("name", "")), axis=1)
     data["merlion_brand_ok"] = data["brand"].apply(is_merlion_allowed_brand)
     data["is_original"] = (
         data["merlion_root_ok"]
