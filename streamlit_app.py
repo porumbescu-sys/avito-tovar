@@ -1987,6 +1987,58 @@ def distributor_search_candidates(df: pd.DataFrame, token_norm: str, own_article
     return working.iloc[0:0].copy()
 
 
+
+
+def tis_direct_code_fallback(df: pd.DataFrame, search_codes: list[str], min_qty: float = 1.0) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df.iloc[0:0].copy()
+
+    working = df.copy()
+    if "is_good_offer" in working.columns:
+        working = working[working["is_good_offer"] == True].copy()
+    if working.empty:
+        return working
+    working = tis_brand_filter(working)
+    if working.empty:
+        return working
+    working = working[working["free_qty"].astype(float) >= float(min_qty)].copy()
+    if working.empty:
+        return working
+
+    codes = unique_norm_codes(search_codes)
+    if not codes:
+        return working.iloc[0:0].copy()
+
+    def _pick(found: pd.DataFrame, rank: int) -> pd.DataFrame:
+        if found.empty:
+            return found
+        sort_cols = [c for c in ["sheet_priority", "price", "free_qty", "article_norm"] if c in found.columns]
+        ascending = [True, True, False, True][:len(sort_cols)]
+        found = found.sort_values(sort_cols, ascending=ascending).copy()
+        if "sheet_priority" in found.columns:
+            best_priority = found["sheet_priority"].min()
+            found = found[found["sheet_priority"] == best_priority].copy()
+        found["_match_rank"] = rank
+        return found
+
+    primary = working[working["article_norm"].isin(codes)].copy()
+    primary = _pick(primary, 0)
+    if not primary.empty:
+        return primary
+
+    alt = working[row_alt_exact_match_mask(working, codes)].copy()
+    alt = _pick(alt, 1)
+    if not alt.empty:
+        return alt
+
+    linked = working[working["name_code_list"].apply(lambda lst: any(code in (lst or []) for code in codes) if isinstance(lst, list) else False)].copy()
+    linked = _pick(linked, 2)
+    if not linked.empty:
+        return linked
+
+    return working.iloc[0:0].copy()
+
+
 def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, Any], token: str, search_mode: str, min_qty: float = 1.0) -> dict[str, Any] | None:
     if df is None or df.empty:
         return None
@@ -2000,7 +2052,11 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
 
     cand = distributor_search_candidates(df, token_norm, own_article_norm, search_mode, own_codes=own_compare_codes)
     if cand.empty:
-        return None
+        dist_name = str(df["distributor"].iloc[0]) if "distributor" in df.columns and not df.empty else ""
+        if dist_name == "Тис":
+            cand = tis_direct_code_fallback(df, [token_norm, own_article_norm, *own_compare_codes], min_qty=min_qty)
+        if cand.empty:
+            return None
     cand = cand[cand["free_qty"].astype(float) >= float(min_qty)].copy()
     if "is_good_offer" in cand.columns:
         cand = cand[cand["is_good_offer"] == True].copy()
@@ -2011,7 +2067,21 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
         if orig.empty:
             return None
         cand = orig
-    cand = cand[cand.apply(lambda r: is_confident_distributor_row_for_choice(r, choice, token_norm, own_codes=own_compare_codes), axis=1)].copy()
+    dist_name = str(df["distributor"].iloc[0]) if "distributor" in df.columns and not df.empty else ""
+    if dist_name == "Тис":
+        # Для Тис точные попадания по коду или альтернативному коду считаем валидными сразу.
+        direct_mask = (
+            cand["article_norm"].isin(set(unique_norm_codes([token_norm, own_article_norm, *own_compare_codes])))
+            | row_alt_exact_match_mask(cand, [token_norm, own_article_norm, *own_compare_codes])
+            | cand["name_code_list"].apply(lambda lst: any(code in (lst or []) for code in set(unique_norm_codes([token_norm, own_article_norm, *own_compare_codes]))) if isinstance(lst, list) else False)
+        )
+        direct = cand[direct_mask].copy()
+        if not direct.empty:
+            cand = direct
+        else:
+            cand = cand[cand.apply(lambda r: is_confident_distributor_row_for_choice(r, choice, token_norm, own_codes=own_compare_codes), axis=1)].copy()
+    else:
+        cand = cand[cand.apply(lambda r: is_confident_distributor_row_for_choice(r, choice, token_norm, own_codes=own_compare_codes), axis=1)].copy()
     if cand.empty:
         return None
     if own_brand:
