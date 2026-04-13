@@ -149,11 +149,15 @@ MERLION_ALLOWED_PRODUCT_TYPES = {
     "ТОНЕР",
     "ТОНЕР-КАРТРИДЖИ",
     "ЧЕРНИЛА",
+    "ФОТОБАРАБАН",
+    "БЛОК ФОТОБАРАБАНА",
+    "DRUM",
+    "DRUM UNIT",
 }
 RESOURCE_ALLOWED_BRAND_KEYS = {
     "AVISION", "BROTHER", "CANON", "EPSON", "HP", "KONICAMINOLTA", "KYOCERA",
-    "LEXMARK", "OKI", "PANASONIC", "PANTUM", "RICOH", "XEROX", "SAMSUNG",
-    "SHARP", "КАТЮША"
+    "KYOCERAMITA", "LEXMARK", "OKI", "PANASONIC", "PANTUM", "RICOH", "RICOHPRO",
+    "FPLUSIMAGING", "XEROX", "SAMSUNG", "SHARP", "КАТЮША"
 }
 OCS_ALLOWED_BRAND_KEYS = set(RESOURCE_ALLOWED_BRAND_KEYS)
 MERLION_ALLOWED_BRAND_KEYS = set(RESOURCE_ALLOWED_BRAND_KEYS)
@@ -496,7 +500,14 @@ def is_merlion_allowed_group2(value: object) -> bool:
 
 
 def is_merlion_allowed_type(value: object) -> bool:
-    return contains_text(value) in MERLION_ALLOWED_PRODUCT_TYPES
+    text = contains_text(value)
+    if text in MERLION_ALLOWED_PRODUCT_TYPES:
+        return True
+    fuzzy_markers = [
+        "ФОТОБАРАБ", "БЛОК ФОТОБАРАБАН", "DRUM", "DRUM UNIT",
+        "ДРАМ", "ТОНЕР", "КАРТРИДЖ", "ЧЕРНИЛ", "ЛЕНТОЧН", "ПЕЧАТАЮЩ", "ГОЛОВК"
+    ]
+    return any(marker in text for marker in fuzzy_markers)
 
 
 def is_merlion_allowed_brand(value: object) -> bool:
@@ -1607,6 +1618,7 @@ def load_merlion_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     data = pd.DataFrame()
     data["article"] = first_existing_series(df, ["Код производителя"], "").map(normalize_text)
     data["alt_article"] = first_existing_series(df, ["Доп. Номер"], "").map(normalize_text)
+    data["alt_code_list"] = data["alt_article"].map(parse_semicolon_code_list)
     data["name"] = first_existing_series(df, ["Наименование"], "").map(normalize_text)
     data["brand"] = first_existing_series(df, ["Бренд", "Производитель"], "").combine(first_existing_series(df, ["Наименование"], ""), lambda b, n: normalize_or_infer_brand(b, n))
     data["group_root"] = first_existing_series(df, ["Группа 1", "Группа1", "Товарная группа", "Группа"], "").map(normalize_text)
@@ -1739,6 +1751,14 @@ def row_alt_exact_match_mask(df: pd.DataFrame, search_codes: list[str]) -> pd.Se
     return df["alt_article_norm"].isin(code_set)
 
 
+def parse_semicolon_code_list(value: object) -> list[str]:
+    raw = normalize_text(value)
+    if not raw:
+        return []
+    parts = re.split(r"[;|,]+", raw)
+    return unique_norm_codes(parts)
+
+
 def resource_search_candidates(df: pd.DataFrame, token_norm: str, own_article_norm: str, search_mode: str, own_codes: Optional[list[str]] = None) -> pd.DataFrame:
     if df is None or df.empty:
         return df.iloc[0:0].copy()
@@ -1848,31 +1868,27 @@ def merlion_search_candidates(df: pd.DataFrame, token_norm: str, own_article_nor
     if not search_codes:
         return working.iloc[0:0].copy()
 
-    alt_exact = working[working["alt_article_norm"].isin(search_codes)].copy()
+    alt_exact = working[row_alt_exact_match_mask(working, search_codes)].copy()
     if not alt_exact.empty:
-        alt_exact = alt_exact[alt_exact.apply(lambda r: is_confident_alt_exact_match(r, next((c for c in search_codes if normalize_article(r.get("alt_article", "")) == c), token_norm or own_article_norm)), axis=1)].copy()
-        if not alt_exact.empty:
-            alt_exact["_match_rank"] = 0
-            return alt_exact
+        alt_exact["_match_rank"] = 0
+        return alt_exact
 
     primary_exact = working[working["article_norm"].isin(search_codes)].copy()
     if not primary_exact.empty:
         primary_exact["_match_rank"] = 1
         return primary_exact
 
-    pantum_p = working[working.apply(lambda r: any(pantum_safe_p_alias_match(code, r) for code in search_codes), axis=1)].copy()
-    if not pantum_p.empty:
-        pantum_p = pantum_p[~pantum_p["article_norm"].isin(search_codes) & ~pantum_p["alt_article_norm"].isin(search_codes)].copy()
-        if not pantum_p.empty:
-            pantum_p["_match_rank"] = 2
-            return pantum_p
-
     linked = working[working["name_code_list"].apply(lambda codes: any(code in codes for code in search_codes) if isinstance(codes, list) else False)].copy()
     if not linked.empty:
-        linked = linked[linked.apply(lambda r: is_confident_alt_exact_match(r, token_norm or own_article_norm), axis=1)].copy()
-        if not linked.empty:
-            linked["_match_rank"] = 3
-            return linked
+        linked["_match_rank"] = 2
+        return linked
+
+    pantum_p = working[working.apply(lambda r: any(pantum_safe_p_alias_match(code, r) for code in search_codes), axis=1)].copy()
+    if not pantum_p.empty:
+        pantum_p = pantum_p[~pantum_p["article_norm"].isin(search_codes) & ~row_alt_exact_match_mask(pantum_p, search_codes)].copy()
+        if not pantum_p.empty:
+            pantum_p["_match_rank"] = 3
+            return pantum_p
 
     return working.iloc[0:0].copy()
 
@@ -2068,12 +2084,13 @@ def get_best_distributor_match_for_source(df: pd.DataFrame, choice: dict[str, An
             return None
         cand = orig
     dist_name = str(df["distributor"].iloc[0]) if "distributor" in df.columns and not df.empty else ""
-    if dist_name == "Тис":
-        # Для Тис точные попадания по коду или альтернативному коду считаем валидными сразу.
+    direct_code_set = set(unique_norm_codes([token_norm, own_article_norm, *own_compare_codes]))
+    if dist_name in {"Тис", "Мерлион"}:
+        # Для Тис и Мерлион точные попадания по коду / альтернативному коду / коду из названия считаем валидными сразу.
         direct_mask = (
-            cand["article_norm"].isin(set(unique_norm_codes([token_norm, own_article_norm, *own_compare_codes])))
+            cand["article_norm"].isin(direct_code_set)
             | row_alt_exact_match_mask(cand, [token_norm, own_article_norm, *own_compare_codes])
-            | cand["name_code_list"].apply(lambda lst: any(code in (lst or []) for code in set(unique_norm_codes([token_norm, own_article_norm, *own_compare_codes]))) if isinstance(lst, list) else False)
+            | cand["name_code_list"].apply(lambda lst: any(code in (lst or []) for code in direct_code_set) if isinstance(lst, list) else False)
         )
         direct = cand[direct_mask].copy()
         if not direct.empty:
