@@ -2529,7 +2529,7 @@ def build_product_analysis_workbook_bytes(result_df: pd.DataFrame, search_mode: 
 
 
 
-def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: str, min_qty: float, price_mode: str, round100: bool, custom_discount: float, external_df: Optional[pd.DataFrame] = None) -> None:
+def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: str, min_qty: float, price_mode: str, round100: bool, custom_discount: float, external_df: Optional[pd.DataFrame] = None, show_external_banner: bool = True) -> None:
     all_prices_df = build_all_distributor_prices_df(
         result_df,
         search_mode,
@@ -2544,7 +2544,7 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
         return
 
     st.caption("Здесь видно не только лучшую цену, но и следующую цену у других дистрибьютеров, плюс остаток. Это помогает не снижать цену из-за единичного хвоста на складе.")
-    if isinstance(external_df, pd.DataFrame) and not external_df.empty:
+    if show_external_banner and isinstance(external_df, pd.DataFrame) and not external_df.empty:
         render_info_banner(
             "Кандидаты на заведение",
             "Ниже также показываются позиции, которых сейчас нет в вашем загруженном прайсе, но они есть у дистрибьютеров. Это удобно для анализа новых ходовых позиций перед заведением.",
@@ -2659,6 +2659,127 @@ def render_all_distributor_prices_block(result_df: pd.DataFrame, search_mode: st
         file_name="moy_tovar_all_distributor_prices.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+
+def build_candidate_analysis_df(external_df: pd.DataFrame, search_mode: str, min_qty: float = 1.0, price_mode: Optional[str] = None, round100: bool = True, custom_discount: float = 0.0) -> pd.DataFrame:
+    if external_df is None or external_df.empty:
+        return pd.DataFrame()
+    all_prices_df = build_all_distributor_prices_df(
+        pd.DataFrame(),
+        search_mode,
+        min_qty=min_qty,
+        price_mode=price_mode,
+        round100=round100,
+        custom_discount=custom_discount,
+        external_df=external_df,
+    )
+    if all_prices_df.empty:
+        return pd.DataFrame()
+
+    dist_rows = all_prices_df[~all_prices_df["Источник"].isin(["Мы", "У нас"])].copy()
+    dist_rows = dist_rows[dist_rows["Цена"].notna()].copy()
+    if dist_rows.empty:
+        return pd.DataFrame()
+
+    dist_rows["_price"] = pd.to_numeric(dist_rows["Цена"], errors="coerce")
+    dist_rows["_qty"] = pd.to_numeric(dist_rows["Остаток"], errors="coerce")
+    dist_rows = dist_rows.sort_values(["Артикул", "_price", "_qty", "Источник"], ascending=[True, True, False, True], na_position="last")
+
+    rows: list[dict[str, Any]] = []
+    for article, group_df in dist_rows.groupby("Артикул", sort=False):
+        rec = group_df.iloc[0]
+        src_sheet = normalize_text(rec.get("Лист источника", ""))
+        source_hint = src_sheet if src_sheet else normalize_text(rec.get("Источник", ""))
+        rows.append({
+            "Артикул": article,
+            "Название": normalize_text(rec.get("Название", "")),
+            "Лучший дистрибьютер": normalize_text(rec.get("Источник", "")),
+            "Цена": safe_float(rec.get("Цена", 0), 0.0),
+            "Остаток": safe_float(rec.get("Остаток", 0), 0.0),
+            "Источник": source_hint,
+            "Комментарий": "",
+            "Решение": "",
+        })
+
+    out = pd.DataFrame(rows)
+    return out.sort_values(["Цена", "Остаток", "Артикул"], ascending=[True, False, True]).reset_index(drop=True)
+
+
+def candidates_analysis_to_excel_bytes(external_df: pd.DataFrame, search_mode: str, min_qty: float = 1.0, price_mode: Optional[str] = None, round100: bool = True, custom_discount: float = 0.0) -> bytes:
+    export_df = build_candidate_analysis_df(
+        external_df,
+        search_mode,
+        min_qty=min_qty,
+        price_mode=price_mode,
+        round100=round100,
+        custom_discount=custom_discount,
+    )
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Кандидаты")
+        ws = writer.book["Кандидаты"]
+        widths = {"A":16, "B":48, "C":20, "D":12, "E":12, "F":16, "G":30, "H":18}
+        for col, width in widths.items():
+            ws.column_dimensions[col].width = width
+        for cell in ws[1]:
+            cell.font = openpyxl.styles.Font(bold=True)
+            cell.fill = openpyxl.styles.PatternFill(fill_type="solid", fgColor="D9E2F3")
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = f"A1:H{max(ws.max_row,1)}"
+    bio.seek(0)
+    return bio.read()
+
+
+def render_market_candidates_section(external_df: pd.DataFrame, search_mode: str, min_qty: float, price_mode: str, round100: bool, custom_discount: float) -> None:
+    if external_df is None or external_df.empty:
+        return
+
+    st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
+    render_block_header(
+        "Кандидаты на заведение",
+        "Позиции не найдены в нашем прайсе, но найдены у дистрибьютеров. Блок нужен для анализа новых товаров перед добавлением.",
+        icon="🧭",
+        help_text="Здесь собираются только внешние кандидаты: их нет в вашем загруженном прайсе, но они есть у дистрибьютеров. Карточки отсортированы по цене, а для Тис дополнительно видно, из какого листа пришло предложение: Распродажа или Стандарт.",
+    )
+    render_info_banner(
+        "Что показывает этот раздел",
+        "Ниже собраны только валидные позиции, которых сейчас нет у вас в прайсе. Это помогает быстро понять, стоит ли заводить товар: видно лучшего поставщика, цену, остаток и источник предложения.",
+        icon="✨",
+        chips=["только новые позиции", "дистрибьютеры отсортированы по цене", "Тис: Распродажа / Стандарт", "есть Excel для закупки"],
+        tone="blue",
+    )
+    c1, c2, c3 = st.columns([1, 1, 2])
+    c1.metric("Кандидатов", len(external_df))
+    analysis_df = build_candidate_analysis_df(external_df, search_mode, min_qty=min_qty, price_mode=price_mode, round100=round100, custom_discount=custom_discount)
+    c2.metric("С Excel строк", len(analysis_df) if isinstance(analysis_df, pd.DataFrame) else 0)
+    c3.caption("Сначала смотрим, кто даёт самую низкую цену и какой остаток доступен. Для Тис отдельно видно, это Распродажа или Стандарт.")
+
+    render_all_distributor_prices_block(
+        pd.DataFrame(),
+        search_mode,
+        min_qty,
+        price_mode,
+        round100,
+        custom_discount,
+        external_df=external_df,
+        show_external_banner=False,
+    )
+
+    render_action_callout(
+        "Скачать анализ кандидатов",
+        "Экспорт создан именно для закупочного анализа новых позиций. Внутри уже есть артикул, лучший дистрибьютер, цена, остаток и источник. Поля «Комментарий» и «Решение» остаются пустыми — их удобно заполнять после обсуждения.",
+        icon="🧾",
+        badges=["артикул и лучший поставщик уже внутри", "Тис показывает лист источника", "поля для решения оставлены пустыми"],
+    )
+    st.download_button(
+        "⬇️ Скачать анализ кандидатов в Excel",
+        candidates_analysis_to_excel_bytes(external_df, search_mode, min_qty=min_qty, price_mode=price_mode, round100=round100, custom_discount=custom_discount),
+        file_name="market_candidates_analysis.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        help="Файл для анализа новых позиций: артикул, лучший дистрибьютер, цена, остаток, источник, комментарий и решение.",
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def build_full_distributor_report(df: pd.DataFrame, threshold_percent: float, search_mode: str, min_qty: float = 1.0) -> pd.DataFrame:
@@ -3486,15 +3607,12 @@ elif result_df is None or result_df.empty:
     if isinstance(external_market_df, pd.DataFrame) and not external_market_df.empty:
         render_info_banner(
             "В нашем прайсе позиции не найдены",
-            "Но они есть у дистрибьютеров. Можно сразу посмотреть цены и остатки, чтобы решить, стоит ли заводить их к себе.",
+            "Но они есть у дистрибьютеров. Ниже будет отдельный раздел «Кандидаты на заведение», где можно спокойно сравнить цены и остатки перед добавлением товара.",
             icon="🧭",
-            chips=["у нас нет в прайсе", "есть у дистрибьютеров", "удобно для анализа новых позиций"],
+            chips=["у нас нет в прайсе", "есть у дистрибьютеров", "ниже отдельный раздел кандидатов"],
             tone="blue",
         )
         st.metric("Новых кандидатов", len(external_market_df))
-        if distributor_sources_ready():
-            with st.expander("Показать цены у всех", expanded=True):
-                render_all_distributor_prices_block(pd.DataFrame(), search_mode, min_dist_qty, price_mode, round100, custom_discount, external_df=external_market_df)
     else:
         st.warning("Ничего не найдено. Попробуйте другой артикул, бренд или часть названия.")
 else:
@@ -3555,12 +3673,12 @@ else:
         if isinstance(external_market_df, pd.DataFrame) and not external_market_df.empty:
             render_action_callout(
                 "Дополнительно нашлись позиции, которых нет у нас в прайсе",
-                "Они тоже попадут в блок «Показать цены у всех». Так можно сразу анализировать новые товары, даже если сейчас их нет в загруженном прайсе.",
+                "Они вынесены в отдельный раздел «Кандидаты на заведение» ниже. Так текущие позиции и новые кандидаты не смешиваются между собой.",
                 icon="✨",
-                badges=["анализ новых позиций", "цены и остатки уже собраны", "ядро поиска не тронуто"],
+                badges=["отдельный блок ниже", "удобнее для закупки", "не мешает текущим результатам"],
             )
         with st.expander("Показать цены у всех"):
-            render_all_distributor_prices_block(result_df, search_mode, min_dist_qty, price_mode, round100, custom_discount, external_df=external_market_df)
+            render_all_distributor_prices_block(result_df, search_mode, min_dist_qty, price_mode, round100, custom_discount, external_df=None)
         render_action_callout(
             "Файл для согласования с руководителем",
             "Этот экспорт собирает базовую аналитику по найденным товарам: ваш текущий прод, лучшую цену поставщика и поля, которые удобно дозаполнить вручную перед обсуждением новых цен.",
@@ -3576,6 +3694,9 @@ else:
         )
 
 st.markdown('</div>', unsafe_allow_html=True)
+
+if isinstance(external_market_df, pd.DataFrame) and not external_market_df.empty and distributor_sources_ready():
+    render_market_candidates_section(external_market_df, search_mode, min_dist_qty, price_mode, round100, custom_discount)
 
 
 # ----------------------
