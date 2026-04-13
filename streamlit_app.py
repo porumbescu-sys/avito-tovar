@@ -1537,13 +1537,17 @@ def parse_merlion_qty(value: Any) -> float:
     if not text:
         return 0.0
     try:
-        return float(str(value).replace(",", "."))
+        return float(str(value).replace(" ", "").replace(",", "."))
     except Exception:
         pass
     if text in {"+++", "МНОГО"}:
         return 10.0
-    if text in {"+", "МАЛО"}:
+    if text in {"++", "СРЕДНЕ", "СРЕДНЕЕ", "СРЕДНИЙ", "СРЕДНЯЯ"}:
+        return 5.0
+    if text in {"+", "МАЛО", "ЕСТЬ"}:
         return 1.0
+    if text in {"НЕТ", "-", "--", "---"}:
+        return 0.0
     return 0.0
 
 
