@@ -4327,6 +4327,24 @@ def get_best_offer(row: pd.Series, min_qty: float = 1.0) -> dict[str, Any] | Non
     return best
 
 
+def get_best_offer_if_cheaper(row: pd.Series | dict[str, Any], min_qty: float = 1.0) -> dict[str, Any] | None:
+    best = get_best_offer(row, min_qty=min_qty)
+    if not best:
+        return None
+    if safe_float(best.get("delta"), 0.0) <= 0:
+        return None
+    return best
+
+
+def get_best_offer_if_profitable(row: pd.Series | dict[str, Any], min_qty: float = 1.0, threshold_pct: float = 35.0) -> dict[str, Any] | None:
+    best = get_best_offer_if_cheaper(row, min_qty=min_qty)
+    if not best:
+        return None
+    if safe_float(best.get("delta_percent"), 0.0) < float(threshold_pct):
+        return None
+    return best
+
+
 def build_distributor_compare(result_df: pd.DataFrame, min_qty: float = 1.0) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     if result_df is None or result_df.empty:
@@ -4442,6 +4460,7 @@ def build_report_df(
 
         hot_rec = pick_hot_watch_rec(row, hot_lookup) if hot_lookup else None
         best = get_best_offer(row, min_qty=min_qty)
+        profitable_best = get_best_offer_if_profitable(row, min_qty=min_qty, threshold_pct=float(threshold_percent))
 
         best_source = ""
         best_price = None
@@ -4450,12 +4469,12 @@ def build_report_df(
         delta_pct = None
         profitable_offer = False
 
-        if best:
-            best_source = normalize_text(best.get("source", ""))
-            best_price_val = safe_float(best.get("price"), 0.0)
-            best_qty_val = safe_float(best.get("qty"), 0.0)
-            delta_val = safe_float(best.get("delta"), 0.0)
-            delta_pct_val = safe_float(best.get("delta_percent"), 0.0)
+        if profitable_best:
+            best_source = normalize_text(profitable_best.get("source", ""))
+            best_price_val = safe_float(profitable_best.get("price"), 0.0)
+            best_qty_val = safe_float(profitable_best.get("qty"), 0.0)
+            delta_val = safe_float(profitable_best.get("delta"), 0.0)
+            delta_pct_val = safe_float(profitable_best.get("delta_percent"), 0.0)
 
             if best_price_val > 0:
                 best_price = best_price_val
@@ -4464,11 +4483,7 @@ def build_report_df(
             delta = delta_val
             delta_pct = round(delta_pct_val, 2)
 
-            profitable_offer = (
-                best_price_val > 0
-                and delta_val > 0
-                and delta_pct_val >= float(threshold_percent)
-            )
+            profitable_offer = True
 
         # Управленческий отчёт:
         # строка попадает в отчёт, если она есть в watchlist
@@ -4478,7 +4493,7 @@ def build_report_df(
 
         action_text = ""
         if hot_rec:
-            action_text, _ = hot_supplier_note(row, best, threshold_pct=float(threshold_percent))
+            action_text, _ = hot_supplier_note(row, profitable_best, threshold_pct=float(threshold_percent))
         elif profitable_offer:
             action_text = f"Сейчас можно брать у {best_source}" if best_source else "Сейчас можно брать"
 
@@ -4555,7 +4570,7 @@ def build_product_analysis_df(result_df: pd.DataFrame, min_qty: float = 1.0) -> 
             continue
         seen.add(row_key)
 
-        best_offer = get_best_offer(row, min_qty=min_qty)
+        best_offer = get_best_offer_if_cheaper(row, min_qty=min_qty)
         rows.append({
             "Артикул": str(row.get("article", "") or ""),
             "Название": str(row.get("name", "") or ""),
@@ -5264,8 +5279,8 @@ def render_avito_block(avito_df: pd.DataFrame, result_df: pd.DataFrame) -> None:
 def to_excel_bytes(df: pd.DataFrame, price_mode: str, round100: bool, custom_discount: float, min_qty: float) -> bytes:
     export_df = df.copy()
     export_df[current_price_label(price_mode, custom_discount)] = export_df.apply(lambda row: fmt_price(get_selected_price_raw(row, price_mode, round100, custom_discount)), axis=1)
-    export_df["Лучшая цена поставщика"] = export_df.apply(lambda row: (get_best_offer(row, min_qty=min_qty) or {}).get("price_fmt", ""), axis=1)
-    export_df["Лучший поставщик"] = export_df.apply(lambda row: (get_best_offer(row, min_qty=min_qty) or {}).get("source", ""), axis=1)
+    export_df["Лучшая цена поставщика"] = export_df.apply(lambda row: (get_best_offer_if_cheaper(row, min_qty=min_qty) or {}).get("price_fmt", ""), axis=1)
+    export_df["Лучший поставщик"] = export_df.apply(lambda row: (get_best_offer_if_cheaper(row, min_qty=min_qty) or {}).get("source", ""), axis=1)
     export_df["Фото"] = export_df.get("photo_url", "")
     export_df = export_df[["article", "name", "free_qty", "sale_price", current_price_label(price_mode, custom_discount), "Лучший поставщик", "Лучшая цена поставщика", "Фото"]].rename(columns={
         "article": "Артикул",
@@ -8264,8 +8279,8 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
                 tech = display_result_df.copy()
                 tech["Наша цена"] = tech["sale_price"].map(fmt_price)
                 tech["Наш склад"] = tech["free_qty"].map(fmt_qty)
-                tech["Лучшая цена"] = tech.apply(lambda row: (get_best_offer(row, min_qty=min_dist_qty) or {}).get("price_fmt", ""), axis=1)
-                tech["Лучший поставщик"] = tech.apply(lambda row: (get_best_offer(row, min_qty=min_dist_qty) or {}).get("source", ""), axis=1)
+                tech["Лучшая цена"] = tech.apply(lambda row: (get_best_offer_if_cheaper(row, min_qty=min_dist_qty) or {}).get("price_fmt", ""), axis=1)
+                tech["Лучший поставщик"] = tech.apply(lambda row: (get_best_offer_if_cheaper(row, min_qty=min_dist_qty) or {}).get("source", ""), axis=1)
                 tech["Фото"] = tech.get("photo_url", "")
                 if "hot_flag" in tech.columns:
                     tech["Ходовая"] = tech["hot_flag"].map(lambda x: "Да" if bool(x) else "")
