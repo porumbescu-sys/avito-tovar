@@ -4796,14 +4796,19 @@ def build_product_analysis_df(result_df: pd.DataFrame, min_qty: float = 1.0) -> 
     if result_df is None or result_df.empty:
         return pd.DataFrame()
 
+    enriched_df = apply_purchase_cost_map(result_df, st.session_state.get("purchase_cost_df")) if isinstance(result_df, pd.DataFrame) else result_df
+    if not isinstance(enriched_df, pd.DataFrame) or enriched_df.empty:
+        return pd.DataFrame()
+
     seen: set[str] = set()
-    for _, row in result_df.iterrows():
+    for _, row in enriched_df.iterrows():
         row_key = str(row.get("article_norm") or normalize_article(row.get("article", "")))
         if row_key in seen:
             continue
         seen.add(row_key)
 
         best_offer = get_best_offer_if_cheaper(row, min_qty=min_qty)
+        purchase_avg_cost = safe_float(row.get("purchase_avg_cost"), 0.0)
         rows.append({
             "Артикул": str(row.get("article", "") or ""),
             "Название": str(row.get("name", "") or ""),
@@ -4812,6 +4817,10 @@ def build_product_analysis_df(result_df: pd.DataFrame, min_qty: float = 1.0) -> 
             "дистр": safe_float(best_offer.get("price", 0), 0.0) if best_offer else None,
             "Дистрибьютор": str(best_offer.get("source", "") or "") if best_offer else "",
             "Остаток дистрибьютора": safe_float(best_offer.get("qty", 0), 0.0) if best_offer else None,
+            "сред. Зак.": purchase_avg_cost if purchase_avg_cost > 0 else None,
+            "Источник закупки": normalize_text(row.get("purchase_match_source", "")),
+            "Название закупки": normalize_text(row.get("purchase_source_name", "")),
+            "Лист закупки": normalize_text(row.get("purchase_source_sheet", "")),
         })
 
     return pd.DataFrame(rows)
@@ -4862,7 +4871,7 @@ def build_product_analysis_workbook_bytes(result_df: pd.DataFrame, min_qty: floa
         ws.cell(excel_row, 8).value = None
         ws.cell(excel_row, 9).value = None
         ws.cell(excel_row, 10).value = None
-        ws.cell(excel_row, 11).value = None
+        ws.cell(excel_row, 11).value = rec.get("сред. Зак.", None)
         ws.cell(excel_row, 12).value = f'=IF(E{excel_row}="","",E{excel_row}-E{excel_row}*5%)'
         ws.cell(excel_row, 13).value = f'=IF(L{excel_row}="","",L{excel_row}-L{excel_row}*20%)'
         ws.cell(excel_row, 15).value = f'=IF(OR(K{excel_row}="",K{excel_row}=0,L{excel_row}=""),"",L{excel_row}/K{excel_row}-1)'
@@ -4878,6 +4887,20 @@ def build_product_analysis_workbook_bytes(result_df: pd.DataFrame, min_qty: floa
                 comment_lines.append(f"Остаток: {fmt_qty(dist_qty)} шт.")
             if comment_lines:
                 ws.cell(excel_row, 5).comment = openpyxl.comments.Comment("\n".join(comment_lines), "ChatGPT")
+
+        purchase_cost = rec.get("сред. Зак.")
+        if purchase_cost not in (None, ""):
+            purchase_comment_lines = [f"Средняя закупка: {fmt_price(purchase_cost)}"]
+            purchase_source = normalize_text(rec.get("Источник закупки", ""))
+            if purchase_source:
+                purchase_comment_lines.append(f"Источник маппинга: {purchase_source}")
+            purchase_name = normalize_text(rec.get("Название закупки", ""))
+            if purchase_name:
+                purchase_comment_lines.append(f"Номенклатура: {purchase_name}")
+            purchase_sheet = normalize_text(rec.get("Лист закупки", ""))
+            if purchase_sheet:
+                purchase_comment_lines.append(f"Лист: {purchase_sheet}")
+            ws.cell(excel_row, 11).comment = openpyxl.comments.Comment("\n".join(purchase_comment_lines), "ChatGPT")
 
         for col_idx in [4, 5, 6, 7, 8, 9, 10, 11, 12, 13]:
             ws.cell(excel_row, col_idx).number_format = currency_format
@@ -4902,7 +4925,7 @@ def build_product_analysis_workbook_bytes(result_df: pd.DataFrame, min_qty: floa
     info["A4"] = "дистр"
     info["B4"] = "Подставляется лучшая валидная цена поставщика. В комментарии к ячейке есть поставщик и остаток."
     info["A5"] = "МИ / ВЦМ / Ятовары / Мы на авито / авито мин / сред. Зак."
-    info["B5"] = "Эти поля вы заполняете вручную перед обсуждением."
+    info["B5"] = "Сред. Зак. теперь подставляется автоматически из загруженного файла средней закупки, если найден безопасный матч. Остальные поля этой группы можно дозаполнять вручную перед обсуждением."
     info["A6"] = "Прод пред"
     info["B6"] = "Считается как дистр - 5%."
     info["A7"] = "пред на Авито"
