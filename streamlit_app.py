@@ -7264,6 +7264,9 @@ def build_crm_workspace_products_df(
             decision = "Проверить запас"
             reason = f"Запас выше нормального ({stock_months:.2f} мес)"
 
+        supplier_debug_rows = build_supplier_debug_rows(row, min_qty=min_qty)
+        supplier_valid_offers = get_row_offers(row, min_qty=min_qty)
+
         priority = 0.0
         priority += hot_priority_score
         if can_buy:
@@ -7377,6 +7380,8 @@ def build_crm_workspace_products_df(
             "meta_source_sheet": normalize_text(row.get("source_sheet", "")),
             "manual_note": normalize_text(row.get("manual_note", "")),
             "source_pairs": row.get("source_pairs", []) or [],
+            "supplier_debug_rows": supplier_debug_rows,
+            "supplier_valid_offers": supplier_valid_offers,
         })
 
     out = pd.DataFrame(rows)
@@ -7762,11 +7767,27 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         st.write(f"**Подходит к моделям:** {normalize_text(row.get('meta_fits_models', '')) or '—'}")
         st.write(f"**Описание:** {normalize_text(row.get('meta_description', '')) or '—'}")
     with tab3:
-        debug_rows = build_supplier_debug_rows(pd.Series(row), min_qty=float(st.session_state.get("distributor_min_qty", 1.0)))
-        valid = [r for r in debug_rows if normalize_text(r.get("Статус", "")) == "OK"]
-        if not valid:
+        valid_offers = row.get("supplier_valid_offers", []) if isinstance(row.get("supplier_valid_offers", []), list) else []
+        debug_rows = row.get("supplier_debug_rows", []) if isinstance(row.get("supplier_debug_rows", []), list) else []
+
+        if valid_offers:
+            offers_df = pd.DataFrame([
+                {
+                    "Поставщик": normalize_text(x.get("source", "")),
+                    "Цена": safe_float(x.get("price"), 0.0),
+                    "Остаток": safe_float(x.get("qty"), 0.0),
+                    "Статус": normalize_text(x.get("status", "")) or "OK",
+                }
+                for x in valid_offers
+            ])
+            st.success(f"Найдено валидных предложений поставщиков: {len(offers_df)}")
+            st.dataframe(offers_df, use_container_width=True, hide_index=True, height=min(260, 80 + len(offers_df) * 35))
+        else:
             st.info("По этой позиции нет валидных предложений поставщиков.")
-        st.dataframe(pd.DataFrame(debug_rows), use_container_width=True, hide_index=True, height=320)
+
+        if debug_rows:
+            with st.expander("Диагностика офферов", expanded=not bool(valid_offers)):
+                st.dataframe(pd.DataFrame(debug_rows), use_container_width=True, hide_index=True, height=320)
     with tab4:
         task_df = build_task_view_df(sheet_filter=sheet_name)
         if isinstance(task_df, pd.DataFrame) and not task_df.empty:
