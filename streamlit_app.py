@@ -7190,17 +7190,27 @@ def build_crm_workspace_products_df(
 
         is_hot = bool(sales_per_month >= 2.0 or abc_class in {"A", "B"} or hot_buy_signal == "BUY")
         is_strong_demand = bool(abc_class in {"A", "B"})
-        is_dead_stock = bool(own_qty > 0 and stock_months is not None and stock_months >= 6.0 and sales_per_month <= 1.0)
-        is_overstock = bool(stock_months is not None and stock_months >= 3.0)
         is_low_stock = bool(stock_months is not None and stock_months < 1.0)
+        is_caution_stock = bool(stock_months is not None and 2.0 < stock_months <= 6.0)
+        is_stale_risk = bool(stock_months is not None and stock_months > 6.0)
+        is_dead_stock = bool(
+            own_qty > 0
+            and (
+                (stock_months is not None and stock_months > 12.0)
+                or ((stock_months is not None and stock_months > 6.0) and sales_per_month <= 1.0)
+                or (sales_per_month <= 0.3 and own_qty > 0)
+            )
+        )
+        is_overstock = bool(stock_months is not None and stock_months > 6.0)
         effective_gap_pct = max(market_gap_pct, hot_best_supplier_gap_pct)
-        can_buy = bool(
+        raw_can_buy = bool(
             (is_hot or is_strong_demand or hot_buy_signal == "BUY")
             and best_price > 0
             and best_qty > 0
             and (effective_gap_pct >= buy_gap_threshold_pct or hot_buy_signal == "BUY")
         )
-        needs_price_review = bool((best_price > 0 and market_gap_pct > 0) or is_dead_stock)
+        can_buy = bool(raw_can_buy and not is_stale_risk and not is_dead_stock)
+        needs_price_review = bool((best_price > 0 and market_gap_pct > 0) or is_stale_risk or is_dead_stock)
 
         stock_action = "Проверить вручную"
         price_action = "Оставить цену"
@@ -7208,19 +7218,23 @@ def build_crm_workspace_products_df(
         decision = "Проверить вручную"
         reason = "Недостаточно явного сигнала"
 
-        if can_buy and is_low_stock:
+        if is_dead_stock:
+            stock_action = "Распродавать"
+        elif is_stale_risk:
+            stock_action = "Не закупать"
+        elif can_buy and is_low_stock:
             stock_action = "Пополнить запас"
         elif can_buy:
             stock_action = "Можно закупать"
-        elif is_dead_stock:
-            stock_action = "Распродавать"
-        elif is_overstock:
-            stock_action = "Не закупать"
         elif is_hot:
             stock_action = "Держать на складе"
+        elif is_caution_stock:
+            stock_action = "Держать остаток"
 
         if is_dead_stock:
             price_action = "Снизить цену"
+        elif is_stale_risk:
+            price_action = "Пересмотреть цену"
         elif best_price > 0 and market_gap_pct > 0:
             price_action = "Пересмотреть цену"
         elif is_hot and is_low_stock:
@@ -7233,18 +7247,29 @@ def build_crm_workspace_products_df(
         elif not has_avito and own_qty > 0:
             placement_action = "Добавить Avito"
 
-        if can_buy and is_low_stock:
+        translated_watch_action = translate_watch_action(hot_action_today, threshold_pct=buy_gap_threshold_pct)
+        if is_dead_stock:
+            decision = "Распродавать"
+            reason = (
+                f"Слабый спрос ({sales_per_month:.2f} шт/мес) и запас {stock_months:.2f} мес"
+                if stock_months is not None else
+                f"Слабый спрос ({sales_per_month:.2f} шт/мес) и товар застрял на складе"
+            )
+        elif is_stale_risk:
+            decision = "Не покупать"
+            reason = f"Запас уже высокий ({stock_months:.2f} мес) — сначала нужно разгрузить остаток"
+        elif can_buy and is_low_stock:
             decision = "Можно закупать"
             reason = f"Ходовой товар, запас низкий, поставщик ниже нас на {effective_gap_pct:.1f}%"
         elif can_buy:
             decision = "Можно закупать"
             reason = f"Ходовой товар и выгодный вход от поставщика ({effective_gap_pct:.1f}%)"
-        elif hot_action_today and translate_watch_action(hot_action_today, threshold_pct=buy_gap_threshold_pct):
-            decision = translate_watch_action(hot_action_today, threshold_pct=buy_gap_threshold_pct)
+        elif translated_watch_action and translated_watch_action != "Можно брать (-35%+)":
+            decision = translated_watch_action
             reason = "Сигнал пришёл из watchlist по продажам и запасу"
-        elif is_dead_stock:
-            decision = "Распродавать"
-            reason = f"Слабый спрос ({sales_per_month:.2f} шт/мес) и запас {stock_months:.2f} мес"
+        elif translated_watch_action == "Можно брать (-35%+)" and is_stale_risk:
+            decision = "Не покупать"
+            reason = f"Watchlist даёт BUY-сигнал, но у нас уже высокий запас ({stock_months:.2f} мес)"
         elif best_price > 0 and market_gap_pct > 0:
             decision = "Пересмотреть цену"
             reason = f"Наша цена выше рынка на {market_gap_pct:.1f}%"
@@ -7260,9 +7285,9 @@ def build_crm_workspace_products_df(
         elif is_hot:
             decision = "Держать на складе"
             reason = f"Товар ходовой ({sales_per_month:.2f} шт/мес)"
-        elif is_overstock:
-            decision = "Проверить запас"
-            reason = f"Запас выше нормального ({stock_months:.2f} мес)"
+        elif is_caution_stock:
+            decision = "Держать остаток"
+            reason = f"Запас уже заметный ({stock_months:.2f} мес), закупку лучше не ускорять"
 
         supplier_debug_rows = build_supplier_debug_rows(row, min_qty=min_qty)
         supplier_valid_offers = get_row_offers(row, min_qty=min_qty)
@@ -8466,27 +8491,25 @@ else:
     apply_pending_catalog_navigation()
 
     task_counts = task_summary_counts()
-    mode_col, switch_l, switch_m, switch_r = st.columns([1.8, 3.2, 1.25, 1.25])
-    mode_col.radio(
+    st.radio(
         "Режим",
         options=["Каталог", "CRM workspace", "Аналитика"],
         key="app_mode_main",
         horizontal=True,
-        label_visibility="collapsed",
     )
-    switch_l.radio(
-        "Раздел",
+    st.radio(
+        "Активный лист",
         options=[label for _, label, _ in tab_specs],
         key="active_workspace_label",
         horizontal=True,
-        label_visibility="collapsed",
     )
-    switch_m.checkbox(
+    aux_l, aux_r = st.columns([1.2, 1.0])
+    aux_l.checkbox(
         f"🔔 Задачи ({task_counts.get('open', 0)})",
         key="show_task_center_global",
         help="Открывает ленивый список задач и напоминаний по карточкам. Пока чекбокс выключен, список не строится.",
     )
-    switch_r.checkbox(
+    aux_r.checkbox(
         "Показать фото",
         key="show_photos_global",
         help="Включает изображения в карточках поиска. Если отключить, интерфейс становится легче и работает быстрее.",
@@ -8494,6 +8517,10 @@ else:
 
     active_sheet_name, active_tab_label, active_tab_key = label_to_spec[st.session_state.get("active_workspace_label", "Оригинал")]
     active_sheet_df = sheets.get(active_sheet_name) if isinstance(sheets, dict) else None
+    st.caption(
+        f"Каталог загружен: {sum(len(df) for df in sheets.values()) if isinstance(sheets, dict) else 0} строк • "
+        f"активный лист: {active_tab_label} • в активном листе: {len(active_sheet_df) if isinstance(active_sheet_df, pd.DataFrame) else 0} строк"
+    )
 
     if st.session_state.get("app_mode_main") == "CRM workspace":
         st.caption("ⓘ CRM workspace — отдельный рабочий экран закупщика: дашборд, очереди, исполнение, pipeline и карточка товара. Обычный поиск и тяжёлые каталожные блоки ниже скрыты.")
@@ -8522,7 +8549,7 @@ else:
                 float(st.session_state.get("distributor_min_qty", 1.0) or 1.0),
             )
     else:
-        st.caption("ⓘ Верхние переключатели отвечают за быстрый доступ: раздел, задачи и фото. Основные тяжёлые блоки ниже открываются только по чекбоксам.")
+        st.caption("ⓘ Режим и активный лист вынесены отдельно. Тяжёлые блоки ниже по-прежнему открываются только когда реально нужны.")
         if is_service_safe_boot_enabled():
             st.warning("Включён безопасный запуск. Основные тяжёлые блоки временно отключены. Открой 🛡️ Сервисный режим в боковой панели, чтобы проверить систему, восстановить snapshot или выключить safe boot.")
         else:
