@@ -937,7 +937,7 @@ def hot_watchlist_summary_text() -> str:
     hot_df = st.session_state.get("hot_items_df")
     if not isinstance(hot_df, pd.DataFrame) or hot_df.empty:
         return "watchlist не загружен"
-    buy_count = int((hot_df.get("buy_signal_30pct", pd.Series(dtype=object)).fillna("").map(normalize_text).str.upper() == "BUY").sum())
+    buy_count = len(build_hot_buy_watchlist_table())
     ab_count = int(hot_df.get("abc_class", pd.Series(dtype=object)).fillna("").map(normalize_text).isin(["A", "B"]).sum())
     return f"Ходовых: {len(hot_df)} • сильный спрос: {ab_count} • можно брать: {buy_count}"
 
@@ -945,19 +945,24 @@ def build_hot_buy_watchlist_table() -> pd.DataFrame:
     hot_df = st.session_state.get("hot_items_df")
     if not isinstance(hot_df, pd.DataFrame) or hot_df.empty:
         return pd.DataFrame()
+    threshold_pct = float(st.session_state.get("distributor_threshold", 35.0) or 35.0)
     work = hot_df.copy()
     buy_mask = work.get("buy_signal_30pct", pd.Series(dtype=object)).fillna("").map(normalize_text).str.upper().eq("BUY")
     work = work.loc[buy_mask].copy()
     if work.empty:
         return pd.DataFrame()
+
+    gap_series = pd.to_numeric(work.get("best_supplier_gap_pct", 0.0), errors="coerce").fillna(0.0).map(normalize_gap_percent)
     work = work[
         pd.to_numeric(work.get("our_price_now", 0.0), errors="coerce").fillna(0.0).gt(0)
         & pd.to_numeric(work.get("best_supplier_price_now", 0.0), errors="coerce").fillna(0.0).gt(0)
         & pd.to_numeric(work.get("best_supplier_stock_now", 0.0), errors="coerce").fillna(0.0).gt(0)
+        & gap_series.ge(float(threshold_pct))
     ].copy()
     if work.empty:
         return pd.DataFrame()
-    work["gap_pct_display"] = work.get("best_supplier_gap_pct", pd.Series(dtype=float)).fillna(0.0).map(lambda x: round(float(x) * 100.0, 1))
+
+    work["gap_pct_display"] = pd.to_numeric(work.get("best_supplier_gap_pct", 0.0), errors="coerce").fillna(0.0).map(normalize_gap_percent).map(lambda x: round(float(x), 1))
     out = pd.DataFrame({
         "Лист": work.get("current_sheet", ""),
         "Артикул": work.get("comparison_article", work.get("watch_article", "")),
@@ -972,14 +977,13 @@ def build_hot_buy_watchlist_table() -> pd.DataFrame:
         "Ниже нашей цены, %": work.get("gap_pct_display", 0.0),
         "Дней запаса": work.get("days_of_cover", 0.0),
         "Приоритет": work.get("priority_score", 0.0),
-        "Действие": [translate_watch_action(x, threshold_pct=35.0) for x in work.get("action_today", "")],
+        "Действие": [translate_watch_action(x, threshold_pct=threshold_pct) for x in work.get("action_today", "")],
     })
     for col in ["Спрос, шт/мес", "Наша цена", "Наш остаток", "Цена поставщика", "Остаток поставщика", "Ниже нашей цены, %", "Дней запаса", "Приоритет"]:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
     out = out.sort_values(["Приоритет", "Спрос, шт/мес"], ascending=[False, False], kind="stable").reset_index(drop=True)
     return out
-
 
 def render_hot_buy_watchlist_lazy_panel() -> None:
     global_open = bool(st.session_state.get("show_hot_buy_watchlist_table", False))
@@ -1478,6 +1482,13 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return float(default)
+
+
+def normalize_gap_percent(value: Any) -> float:
+    x = safe_float(value, 0.0)
+    if 0 < abs(x) < 1.0:
+        return x * 100.0
+    return x
 
 
 def fmt_price(value: Any) -> str:
@@ -3969,7 +3980,7 @@ def init_state() -> None:
         "template1_footer": DEFAULT_TEMPLATE1_FOOTER,
         "price_patch_input": "",
         "patch_message": "",
-        "distributor_threshold": 20.0,
+        "distributor_threshold": 35.0,
         "distributor_min_qty": 1.0,
         "operation_log": [],
         "app_mode_main": "Каталог",
@@ -4467,7 +4478,7 @@ def build_report_df(
 
         action_text = ""
         if hot_rec:
-            action_text, _ = hot_supplier_note(row, best, threshold_pct=35.0)
+            action_text, _ = hot_supplier_note(row, best, threshold_pct=float(threshold_percent))
         elif profitable_offer:
             action_text = f"Сейчас можно брать у {best_source}" if best_source else "Сейчас можно брать"
 
@@ -5754,11 +5765,11 @@ with st.sidebar:
     hot_df_state = st.session_state.get("hot_items_df")
     hot_buy_total = 0
     if isinstance(hot_df_state, pd.DataFrame) and not hot_df_state.empty:
-        hot_buy_total = int(hot_df_state.get("buy_signal_30pct", pd.Series(dtype=object)).fillna("").map(normalize_text).str.upper().eq("BUY").sum())
+        hot_buy_total = len(build_hot_buy_watchlist_table())
     st.checkbox(
         f"Показать таблицу «можно брать» ({hot_buy_total})",
         key="show_hot_buy_watchlist_table",
-        help="Лениво открывает таблицу только по ходовым позициям со статусом BUY. Пока чекбокс выключен, таблица не строится.",
+        help="Лениво открывает таблицу только по ходовым позициям, где поставщик проходит твой порог выгоды (по умолчанию 35%). Пока чекбокс выключен, таблица не строится.",
     )
     st.caption("ⓘ Таблица «можно брать» показывает только те ходовые позиции, где поставщик проходит твой порог выгоды и есть остаток.")
     st.markdown('</div>', unsafe_allow_html=True)
@@ -7151,7 +7162,7 @@ def build_crm_workspace_products_df(
             pipe_lookup[(normalize_text(pipe_row.get("sheet_name", "")), normalize_text(pipe_row.get("article_norm", "")))] = pipe_row.to_dict()
 
     rows: list[dict[str, Any]] = []
-    buy_gap_threshold_pct = float(st.session_state.get("distributor_threshold", 20.0) or 20.0)
+    buy_gap_threshold_pct = float(st.session_state.get("distributor_threshold", 35.0) or 35.0)
 
     for _, row in enriched.iterrows():
         article = normalize_text(row.get("article", ""))
@@ -7180,7 +7191,7 @@ def build_crm_workspace_products_df(
         hot_buy_signal = normalize_text((hot_rec or {}).get("buy_signal_30pct", "")).upper()
         hot_action_today = normalize_text((hot_rec or {}).get("action_today", ""))
         hot_priority_score = safe_float((hot_rec or {}).get("priority_score"), 0.0)
-        hot_best_supplier_gap_pct = safe_float((hot_rec or {}).get("best_supplier_gap_pct"), 0.0)
+        hot_best_supplier_gap_pct = normalize_gap_percent((hot_rec or {}).get("best_supplier_gap_pct"))
         stock_months = round(own_qty / sales_per_month, 2) if sales_per_month > 0 else None
 
         has_photo = bool(normalize_text(row.get("photo_url", "")))
@@ -7207,7 +7218,7 @@ def build_crm_workspace_products_df(
             (is_hot or is_strong_demand or hot_buy_signal == "BUY")
             and best_price > 0
             and best_qty > 0
-            and (effective_gap_pct >= buy_gap_threshold_pct or hot_buy_signal == "BUY")
+            and effective_gap_pct >= buy_gap_threshold_pct
         )
         can_buy = bool(raw_can_buy and not is_stale_risk and not is_dead_stock)
         needs_price_review = bool((best_price > 0 and market_gap_pct > 0) or is_stale_risk or is_dead_stock)
@@ -7419,7 +7430,7 @@ def build_procurement_decision_df(products_df: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(products_df, pd.DataFrame) or products_df.empty:
         return pd.DataFrame()
     rows: list[dict[str, Any]] = []
-    threshold_pct = float(st.session_state.get("distributor_threshold", 20.0) or 20.0)
+    threshold_pct = float(st.session_state.get("distributor_threshold", 35.0) or 35.0)
     for _, row in products_df.iterrows():
         rows.append({
             "Лист": normalize_text(row.get("sheet_label", "")),
@@ -8731,10 +8742,9 @@ def hot_watchlist_summary_text() -> str:
     hot_df = st.session_state.get("hot_items_df")
     if not isinstance(hot_df, pd.DataFrame) or hot_df.empty:
         return "watchlist не загружен"
-    buy_count = int((hot_df.get("buy_signal_30pct", pd.Series(dtype=object)).fillna("").map(normalize_text).str.upper() == "BUY").sum())
+    buy_count = len(build_hot_buy_watchlist_table())
     ab_count = int(hot_df.get("abc_class", pd.Series(dtype=object)).fillna("").map(normalize_text).isin(["A", "B"]).sum())
     return f"Ходовых: {len(hot_df)} • сильный спрос: {ab_count} • можно брать: {buy_count}"
-
 
 def hot_supplier_note(row: pd.Series | dict | None, best: dict | None, threshold_pct: float = 35.0) -> tuple[str, str]:
     help_text = "Товар ходовой → товар хорошо продавался за выбранный период"
