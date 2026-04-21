@@ -7563,6 +7563,13 @@ def open_product_in_catalog(article: str, sheet_label: str) -> None:
     st.rerun()
 
 
+def open_product_in_crm(article_norm: str, open_photo_editor: bool = False) -> None:
+    st.session_state["crm_workspace_article_norm"] = normalize_text(article_norm)
+    if open_photo_editor:
+        st.session_state["crm_workspace_open_photo_editor_for"] = normalize_text(article_norm)
+    st.rerun()
+
+
 def remember_crm_article(article_norm: str) -> None:
     st.session_state["crm_workspace_article_norm"] = normalize_text(article_norm)
 
@@ -7632,13 +7639,14 @@ def render_crm_workspace_queues(products_df: pd.DataFrame) -> None:
     row_map = {f"{r['Артикул']} • {r['Товар'][:90]}": r for _, r in queue_df.iterrows()}
     pick = st.selectbox("Открыть позицию из очереди", labels, key="crm_queue_pick")
     row = row_map[pick]
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     if c1.button("Открыть в CRM-карточке", use_container_width=True, key="crm_queue_open_card"):
-        remember_crm_article(normalize_text(row.get("article_norm", "")))
-        st.success(f"Позиция {normalize_text(row.get('Артикул', ''))} выбрана для CRM-карточки ниже.")
-    if c2.button("Открыть в каталоге", use_container_width=True, key="crm_queue_open_catalog"):
+        open_product_in_crm(normalize_text(row.get("article_norm", "")), open_photo_editor=False)
+    if c2.button("Открыть и редактировать фото", use_container_width=True, key="crm_queue_open_photo_editor"):
+        open_product_in_crm(normalize_text(row.get("article_norm", "")), open_photo_editor=True)
+    if c3.button("Открыть в каталоге", use_container_width=True, key="crm_queue_open_catalog"):
         open_product_in_catalog(normalize_text(row.get("Артикул", "")), normalize_text(row.get("Лист", "Оригинал")))
-    if c3.button("В работу", use_container_width=True, key="crm_queue_in_work"):
+    if c4.button("В работу", use_container_width=True, key="crm_queue_in_work"):
         upsert_pipeline_registry(
             sheet_name=CRM_SHEET_LABEL_TO_NAME.get(normalize_text(row.get("Лист", "")), normalize_text(row.get("Лист", ""))),
             article=normalize_text(row.get("Артикул", "")),
@@ -7808,8 +7816,12 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         art_norm = normalize_text(row.get("article_norm", ""))
         current_photo_url = normalize_text(row.get("photo_url", ""))
         current_note = normalize_text(row.get("manual_note", ""))
+        force_open_photo_editor_for = normalize_text(st.session_state.pop("crm_workspace_open_photo_editor_for", ""))
+        photo_editor_expanded = (not bool(row.get('has_photo'))) or (force_open_photo_editor_for == art_norm)
+        if force_open_photo_editor_for == art_norm:
+            st.caption("Режим быстрого добавления фото открыт для этой позиции.")
 
-        with st.expander("Фото и заметка по карточке", expanded=not bool(row.get('has_photo'))):
+        with st.expander("Фото и заметка по карточке", expanded=photo_editor_expanded):
             with st.form(f"crm_workspace_card_override_{art_norm}"):
                 photo_url_new = st.text_input(
                     "Фото (ссылка)",
