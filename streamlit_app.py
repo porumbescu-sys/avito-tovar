@@ -4219,6 +4219,7 @@ def init_state() -> None:
         "app_mode_main": "Каталог",
         "crm_queue_filter": "Все",
         "crm_workspace_article_norm": "",
+        "crm_workspace_tab": "Дашборд",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -7847,6 +7848,10 @@ def apply_pending_catalog_navigation() -> None:
     if pending_label:
         st.session_state["active_workspace_label"] = pending_label
 
+    pending_crm_tab = normalize_text(st.session_state.pop("pending_crm_workspace_tab", ""))
+    if pending_crm_tab:
+        st.session_state["crm_workspace_tab"] = pending_crm_tab
+
     pending_article = normalize_text(st.session_state.pop("pending_catalog_article", ""))
     pending_tab_key = normalize_text(st.session_state.pop("pending_catalog_tab_key", "")) or "original"
     if pending_article:
@@ -7873,6 +7878,7 @@ def open_product_in_crm(article_norm: str, sheet_label: str = "", open_photo_edi
     resolved_label = CRM_SHEET_NAME_TO_LABEL.get(normalize_text(sheet_label), normalize_text(sheet_label) or "Оригинал")
     st.session_state["pending_app_mode_main"] = "CRM workspace"
     st.session_state["pending_active_workspace_label"] = resolved_label
+    st.session_state["pending_crm_workspace_tab"] = "Карточка"
     st.session_state["crm_workspace_article_norm"] = normalize_text(article_norm)
     if open_photo_editor:
         st.session_state["crm_workspace_open_photo_editor_for"] = normalize_text(article_norm)
@@ -8309,16 +8315,25 @@ def render_crm_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataFrame |
         st.info("По активному листу пока нет данных для CRM workspace.")
         st.markdown('</div>', unsafe_allow_html=True)
         return
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Дашборд", "Очереди", "Исполнение", "Pipeline", "Карточка"])
-    with tab1:
+
+    crm_sections = ["Дашборд", "Очереди", "Исполнение", "Pipeline", "Карточка"]
+    current_section = st.radio(
+        "Раздел CRM",
+        options=crm_sections,
+        key="crm_workspace_tab",
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+
+    if current_section == "Дашборд":
         render_crm_workspace_dashboard(products_df, tasks_df)
-    with tab2:
+    elif current_section == "Очереди":
         render_crm_workspace_queues(products_df)
-    with tab3:
+    elif current_section == "Исполнение":
         render_crm_workspace_execution(products_df)
-    with tab4:
+    elif current_section == "Pipeline":
         render_crm_workspace_pipeline(products_df)
-    with tab5:
+    else:
         render_crm_workspace_card(products_df, sheet_name, sheet_label)
     st.markdown('</div>', unsafe_allow_html=True)
 
