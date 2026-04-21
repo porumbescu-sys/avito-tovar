@@ -3462,21 +3462,40 @@ def render_crm_issue_open_helper(
 ) -> None:
     if not isinstance(df, pd.DataFrame) or df.empty or "Артикул" not in df.columns:
         return
-    articles = [normalize_text(x) for x in df["Артикул"].tolist() if normalize_text(x)]
-    articles = unique_preserve_order(articles)
-    if not articles:
+    tabkey_to_label = {v: k for k, v in CRM_SHEET_LABEL_TO_TABKEY.items()}
+    working_df = df.copy()
+    working_df["Артикул"] = working_df["Артикул"].astype(str)
+    labels = []
+    row_map = {}
+    for _, row in working_df.iterrows():
+        article = normalize_text(row.get("Артикул", ""))
+        if not article:
+            continue
+        name = normalize_text(row.get("Название", "") or row.get("Товар", ""))
+        label = f"{article} • {name[:90]}" if name else article
+        labels.append(label)
+        row_map[label] = row.to_dict()
+    labels = unique_preserve_order(labels)
+    if not labels:
         return
     c1, c2 = st.columns([4, 1.3])
-    selected_article = c1.selectbox(
-        "Открыть позицию в обычном поиске",
-        articles,
+    selected_label = c1.selectbox(
+        "Открыть позицию",
+        labels,
         key=f"crm_issue_open_select_{box_key}_{tab_key}",
-        help="Открывает позицию в обычном поиске. Дальше можно сразу работать с шаблоном, Avito и карточкой.",
+        help=(
+            "Открывает позицию в CRM или в обычном поиске. "
+            "Для блока без фото лучше сразу идти в CRM-карточку."
+        ),
     )
     if c2.button(button_text, key=f"crm_issue_open_btn_{box_key}_{tab_key}", use_container_width=True):
+        row = row_map.get(selected_label, {})
+        article = normalize_text(row.get("Артикул", ""))
+        sheet_label = normalize_text(row.get("Лист", "")) or tabkey_to_label.get(normalize_text(tab_key), "Оригинал")
         if open_editor:
-            st.session_state[f"show_card_editor_{tab_key}"] = True
-        trigger_search_from_article(selected_article, tab_key)
+            open_product_in_crm(article, sheet_label=sheet_label, open_photo_editor=True)
+        else:
+            trigger_search_from_article(article, tab_key)
 
 
 def render_crm_quality_issue_lazy_panels(
@@ -7563,7 +7582,10 @@ def open_product_in_catalog(article: str, sheet_label: str) -> None:
     st.rerun()
 
 
-def open_product_in_crm(article_norm: str, open_photo_editor: bool = False) -> None:
+def open_product_in_crm(article_norm: str, sheet_label: str = "", open_photo_editor: bool = False) -> None:
+    resolved_label = CRM_SHEET_NAME_TO_LABEL.get(normalize_text(sheet_label), normalize_text(sheet_label) or "Оригинал")
+    st.session_state["pending_app_mode_main"] = "CRM workspace"
+    st.session_state["pending_active_workspace_label"] = resolved_label
     st.session_state["crm_workspace_article_norm"] = normalize_text(article_norm)
     if open_photo_editor:
         st.session_state["crm_workspace_open_photo_editor_for"] = normalize_text(article_norm)
@@ -7641,9 +7663,9 @@ def render_crm_workspace_queues(products_df: pd.DataFrame) -> None:
     row = row_map[pick]
     c1, c2, c3, c4 = st.columns(4)
     if c1.button("Открыть в CRM-карточке", use_container_width=True, key="crm_queue_open_card"):
-        open_product_in_crm(normalize_text(row.get("article_norm", "")), open_photo_editor=False)
+        open_product_in_crm(normalize_text(row.get("article_norm", "")), sheet_label=normalize_text(row.get("Лист", sheet_label)), open_photo_editor=False)
     if c2.button("Открыть и редактировать фото", use_container_width=True, key="crm_queue_open_photo_editor"):
-        open_product_in_crm(normalize_text(row.get("article_norm", "")), open_photo_editor=True)
+        open_product_in_crm(normalize_text(row.get("article_norm", "")), sheet_label=normalize_text(row.get("Лист", sheet_label)), open_photo_editor=True)
     if c3.button("Открыть в каталоге", use_container_width=True, key="crm_queue_open_catalog"):
         open_product_in_catalog(normalize_text(row.get("Артикул", "")), normalize_text(row.get("Лист", "Оригинал")))
     if c4.button("В работу", use_container_width=True, key="crm_queue_in_work"):
