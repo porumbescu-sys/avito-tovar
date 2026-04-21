@@ -7180,7 +7180,8 @@ def build_crm_workspace_products_df(
         best_offer = get_best_offer(row, min_qty=min_qty)
         best_price = safe_float((best_offer or {}).get("price"), 0.0)
         best_qty = safe_float((best_offer or {}).get("qty"), 0.0)
-        market_gap_pct = safe_float((best_offer or {}).get("delta_percent"), 0.0) if best_offer and best_price > 0 and own_price > best_price else 0.0
+        has_cheaper_supplier = bool(best_offer and best_price > 0 and own_price > 0 and best_price < own_price)
+        market_gap_pct = safe_float((best_offer or {}).get("delta_percent"), 0.0) if has_cheaper_supplier else 0.0
 
         hot_rec = pick_hot_watch_rec(row, hot_lookup) if hot_lookup else None
         sales_per_month = safe_float((hot_rec or {}).get("sales_per_month"), 0.0)
@@ -7366,9 +7367,9 @@ def build_crm_workspace_products_df(
             "hot_action_today": hot_action_today,
             "hot_priority_score": hot_priority_score,
             "hot_best_supplier_gap_pct": hot_best_supplier_gap_pct,
-            "best_source": normalize_text((best_offer or {}).get("source", "")),
-            "best_price": best_price if best_price > 0 else None,
-            "best_qty": best_qty if best_qty > 0 else None,
+            "best_source": normalize_text((best_offer or {}).get("source", "")) if has_cheaper_supplier else "",
+            "best_price": best_price if has_cheaper_supplier and best_price > 0 else None,
+            "best_qty": best_qty if has_cheaper_supplier and best_qty > 0 else None,
             "market_gap_pct": round(market_gap_pct, 2) if market_gap_pct > 0 else 0.0,
             "has_photo": has_photo,
             "avito_count": ad_count,
@@ -7780,6 +7781,8 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         left.write(f"**Лист:** {normalize_text(row.get('sheet_label', '')) or sheet_label}")
         left.write(f"**Фото:** {'Да' if bool(row.get('has_photo')) else 'Нет'}")
         left.write(f"**Лучший поставщик:** {normalize_text(row.get('best_source', '')) or '—'}")
+        if not normalize_text(row.get('best_source', '')):
+            left.caption("Сейчас дешевле нашей цены поставщика нет.")
         left.write(f"**Статус рынка:** {'ниже нас' if safe_float(row.get('market_gap_pct', 0.0), 0.0) > 0 else 'нет сигнала рынка'}")
         right.write(f"**Открытых задач:** {safe_int(row.get('open_tasks', 0), 0)}")
         right.write(f"**Продажи/мес:** {fmt_qty(row.get('sales_per_month', 0.0))}")
@@ -7816,8 +7819,14 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
                 }
                 for x in valid_offers
             ])
-            st.success(f"Найдено валидных предложений поставщиков: {len(offers_df)}")
-            st.dataframe(offers_df, use_container_width=True, hide_index=True, height=min(260, 80 + len(offers_df) * 35))
+            cheaper_offers_df = offers_df[offers_df["Цена"].fillna(0).astype(float) < safe_float(row.get("sale_price"), 0.0)].copy()
+            if not cheaper_offers_df.empty:
+                st.success(f"Найдено предложений поставщиков дешевле нашей цены: {len(cheaper_offers_df)}")
+                st.dataframe(cheaper_offers_df, use_container_width=True, hide_index=True, height=min(260, 80 + len(cheaper_offers_df) * 35))
+            else:
+                st.info("Сейчас дешевле нашей цены поставщика нет.")
+                with st.expander("Показать всех валидных поставщиков", expanded=False):
+                    st.dataframe(offers_df, use_container_width=True, hide_index=True, height=min(260, 80 + len(offers_df) * 35))
         else:
             st.info("По этой позиции нет валидных предложений поставщиков.")
 
