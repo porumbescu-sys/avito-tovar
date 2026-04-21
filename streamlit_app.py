@@ -8105,6 +8105,39 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         right.write(f"**Запас, мес:** {fmt_qty(row.get('stock_months', '')) if row.get('stock_months', None) not in (None, '') else '—'}")
         right.write(f"**Комментарий:** {normalize_text(row.get('manual_note', '')) or '—'}")
 
+        purchase_avg_cost = safe_float(row.get("purchase_avg_cost"), 0.0)
+        own_price = safe_float(row.get("sale_price"), 0.0)
+        best_price = safe_float(row.get("best_price"), 0.0)
+        free_qty = safe_float(row.get("free_qty"), 0.0)
+        markup_abs = (own_price - purchase_avg_cost) if own_price > 0 and purchase_avg_cost > 0 else None
+        markup_pct = ((own_price - purchase_avg_cost) / purchase_avg_cost * 100.0) if own_price > 0 and purchase_avg_cost > 0 else None
+        stock_cost_total = (purchase_avg_cost * free_qty) if purchase_avg_cost > 0 and free_qty > 0 else None
+        supplier_vs_purchase_abs = (best_price - purchase_avg_cost) if best_price > 0 and purchase_avg_cost > 0 else None
+        supplier_vs_purchase_pct = ((best_price - purchase_avg_cost) / purchase_avg_cost * 100.0) if best_price > 0 and purchase_avg_cost > 0 else None
+
+        st.markdown("#### Экономика товара")
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("Средняя закупка", fmt_price(purchase_avg_cost) if purchase_avg_cost > 0 else "—")
+        e2.metric("Наценка, ₽", fmt_price(markup_abs) if markup_abs is not None else "—")
+        e3.metric("Наценка к закупке, %", f"{markup_pct:.1f}%" if markup_pct is not None else "—")
+        e4.metric("Склад по закупке", fmt_price(stock_cost_total) if stock_cost_total is not None else "—")
+
+        if purchase_avg_cost > 0 and own_price > 0:
+            if own_price < purchase_avg_cost:
+                st.error("Наша цена сейчас ниже средней закупки. Позицию нужно проверить вручную.")
+            elif markup_pct is not None and markup_pct < 15:
+                st.warning("Наценка к закупке низкая. Проверь цену, налоги и прочие расходы.")
+            else:
+                st.caption("Экономика товара рассчитана по средней закупке из файла `Итог_взвешенный`.")
+        else:
+            st.caption("Для экономики товара нужен загруженный файл средней закупки и уверенный маппинг по названию/коду.")
+
+        if best_price > 0 and purchase_avg_cost > 0:
+            s1, s2, s3 = st.columns(3)
+            s1.metric("Лучшая цена поставщика", fmt_price(best_price))
+            s2.metric("Поставщик vs закупка, ₽", fmt_price(supplier_vs_purchase_abs) if supplier_vs_purchase_abs is not None else "—")
+            s3.metric("Поставщик vs закупка, %", f"{supplier_vs_purchase_pct:.1f}%" if supplier_vs_purchase_pct is not None else "—")
+
         art = normalize_text(row.get("article", ""))
         art_norm = normalize_text(row.get("article_norm", ""))
         current_photo_url = normalize_text(row.get("photo_url", ""))
