@@ -7475,12 +7475,35 @@ def filter_procurement_queue(decision_df: pd.DataFrame, queue_name: str) -> pd.D
     return filtered.reset_index(drop=True)
 
 
+def apply_pending_catalog_navigation() -> None:
+    pending_mode = normalize_text(st.session_state.pop("pending_app_mode_main", ""))
+    if pending_mode:
+        st.session_state["app_mode_main"] = pending_mode
+
+    pending_label = normalize_text(st.session_state.pop("pending_active_workspace_label", ""))
+    if pending_label:
+        st.session_state["active_workspace_label"] = pending_label
+
+    pending_article = normalize_text(st.session_state.pop("pending_catalog_article", ""))
+    pending_tab_key = normalize_text(st.session_state.pop("pending_catalog_tab_key", "")) or "original"
+    if pending_article:
+        query = normalize_query_for_display(pending_article)
+        if query:
+            st.session_state[f"search_input_{pending_tab_key}"] = query
+            st.session_state[f"submitted_query_{pending_tab_key}"] = query
+            st.session_state[f"search_input_widget_pending_{pending_tab_key}"] = query
+            st.session_state[f"last_result_{pending_tab_key}"] = None
+            st.session_state[f"last_result_sig_{pending_tab_key}"] = None
+
+
 def open_product_in_catalog(article: str, sheet_label: str) -> None:
     resolved_label = CRM_SHEET_NAME_TO_LABEL.get(normalize_text(sheet_label), normalize_text(sheet_label) or "Оригинал")
     tab_key = CRM_SHEET_LABEL_TO_TABKEY.get(resolved_label, "original")
-    st.session_state["app_mode_main"] = "Каталог"
-    st.session_state["active_workspace_label"] = resolved_label
-    trigger_search_from_article(article, tab_key)
+    st.session_state["pending_app_mode_main"] = "Каталог"
+    st.session_state["pending_active_workspace_label"] = resolved_label
+    st.session_state["pending_catalog_article"] = normalize_text(article)
+    st.session_state["pending_catalog_tab_key"] = tab_key
+    st.rerun()
 
 
 def remember_crm_article(article_norm: str) -> None:
@@ -8268,6 +8291,8 @@ else:
     label_to_spec = {label: (sheet_name, label, tab_key) for sheet_name, label, tab_key in tab_specs}
     if "active_workspace_label" not in st.session_state:
         st.session_state["active_workspace_label"] = "Оригинал"
+
+    apply_pending_catalog_navigation()
 
     task_counts = task_summary_counts()
     mode_col, switch_l, switch_m, switch_r = st.columns([1.8, 3.2, 1.25, 1.25])
