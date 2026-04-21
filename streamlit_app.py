@@ -7803,6 +7803,65 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         right.write(f"**Продажи/мес:** {fmt_qty(row.get('sales_per_month', 0.0))}")
         right.write(f"**Запас, мес:** {fmt_qty(row.get('stock_months', '')) if row.get('stock_months', None) not in (None, '') else '—'}")
         right.write(f"**Комментарий:** {normalize_text(row.get('manual_note', '')) or '—'}")
+
+        art = normalize_text(row.get("article", ""))
+        art_norm = normalize_text(row.get("article_norm", ""))
+        current_photo_url = normalize_text(row.get("photo_url", ""))
+        current_note = normalize_text(row.get("manual_note", ""))
+
+        with st.expander("Фото и заметка по карточке", expanded=not bool(row.get('has_photo'))):
+            with st.form(f"crm_workspace_card_override_{art_norm}"):
+                photo_url_new = st.text_input(
+                    "Фото (ссылка)",
+                    value=current_photo_url,
+                    key=f"crm_workspace_card_photo_{art_norm}",
+                    placeholder="Вставь прямую ссылку на фото товара",
+                )
+                note_new = st.text_area(
+                    "Заметка",
+                    value=current_note,
+                    height=90,
+                    key=f"crm_workspace_card_note_{art_norm}",
+                    placeholder="Короткий комментарий по товару: что исправили, что проверить, что важно.",
+                )
+                s1, s2 = st.columns(2)
+                save_clicked = s1.form_submit_button("Сохранить карточку", use_container_width=True, type="primary")
+                reset_clicked = s2.form_submit_button("Сбросить ручные правки", use_container_width=True)
+
+            if save_clicked:
+                save_card_override(
+                    sheet_name,
+                    art,
+                    art_norm,
+                    {
+                        "photo_url": photo_url_new,
+                        "name_override": normalize_text(row.get("name", "")),
+                        "meta_brand": normalize_text(row.get("meta_brand", "")),
+                        "meta_model": normalize_text(row.get("meta_model", "")),
+                        "meta_manufacturer_code": normalize_text(row.get("meta_manufacturer_code", "")),
+                        "meta_print_type": normalize_text(row.get("meta_print_type", "")),
+                        "meta_color": normalize_text(row.get("meta_color", "")),
+                        "meta_capacity": normalize_text(row.get("meta_capacity", "")),
+                        "meta_iso_pages": normalize_text(row.get("meta_iso_pages", "")),
+                        "meta_item_type": normalize_text(row.get("meta_item_type", "")),
+                        "meta_print_technology": normalize_text(row.get("meta_print_technology", "")),
+                        "meta_description": normalize_text(row.get("meta_description", "")),
+                        "meta_fits_models": normalize_text(row.get("meta_fits_models", "")),
+                        "meta_weight": normalize_text(row.get("meta_weight", "")),
+                        "meta_length": normalize_text(row.get("meta_length", "")),
+                        "meta_width": normalize_text(row.get("meta_width", "")),
+                        "meta_height": normalize_text(row.get("meta_height", "")),
+                        "note": note_new,
+                    },
+                )
+                st.success(f"Карточка {art} сохранена.")
+                st.rerun()
+
+            if reset_clicked:
+                delete_card_override(sheet_name, art_norm)
+                st.success(f"Ручные правки для {art} сброшены.")
+                st.rerun()
+
         if st.button("Открыть в каталоге", use_container_width=True, key="crm_card_open_catalog"):
             open_product_in_catalog(normalize_text(row.get("article", "")), normalize_text(row.get("sheet_label", sheet_label)))
     with tab2:
