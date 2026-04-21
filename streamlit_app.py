@@ -7821,6 +7821,156 @@ def render_crm_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataFrame |
     st.markdown('</div>', unsafe_allow_html=True)
 
 
+def render_analytics_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataFrame | None, avito_df: pd.DataFrame | None, sheet_name: str, sheet_label: str, min_qty: float) -> None:
+    products_df = build_crm_workspace_products_df(sheet_df, photo_df, avito_df, min_qty, sheet_name, sheet_label)
+    registry_df = load_avito_registry_df()
+    bundle = build_operational_analytics_bundle(
+        sheet_df,
+        photo_df,
+        avito_df,
+        registry_df,
+        min_qty,
+        sheet_label,
+        st.session_state.get("hot_items_df"),
+    ) if isinstance(sheet_df, pd.DataFrame) and not sheet_df.empty else {}
+    decision_df = build_procurement_decision_df(products_df)
+    st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
+    render_block_header(
+        f"Аналитика — {sheet_label}",
+        "Отдельный аналитический экран поверх текущего листа: рынок, спрос, качество карточек, склад и действия закупщика без вмешательства в старое ядро.",
+        icon="📊",
+        help_text="Это отдельный read-only слой аналитики. Он использует те же comparison / фото / Avito / watchlist данные, но не заменяет каталог и не ломает CRM workspace.",
+    )
+    if not isinstance(products_df, pd.DataFrame) or products_df.empty:
+        st.info("По активному листу пока нет данных для аналитики.")
+        st.markdown('</div>', unsafe_allow_html=True)
+        return
+
+    quality = bundle.get("quality", {}) if isinstance(bundle, dict) else {}
+    top_df = bundle.get("top_df", pd.DataFrame()) if isinstance(bundle, dict) else pd.DataFrame()
+    action_df = bundle.get("action_df", pd.DataFrame()) if isinstance(bundle, dict) else pd.DataFrame()
+    account_df = bundle.get("account_df", pd.DataFrame()) if isinstance(bundle, dict) else pd.DataFrame()
+    quality_df = bundle.get("quality_df", pd.DataFrame()) if isinstance(bundle, dict) else pd.DataFrame()
+    series_df = bundle.get("series_df", pd.DataFrame()) if isinstance(bundle, dict) else pd.DataFrame()
+    source_df = bundle.get("source_df", pd.DataFrame()) if isinstance(bundle, dict) else pd.DataFrame()
+    tasks_df = bundle.get("tasks_df", pd.DataFrame()) if isinstance(bundle, dict) else pd.DataFrame()
+    patch_history_df = bundle.get("patch_history_df", pd.DataFrame()) if isinstance(bundle, dict) else pd.DataFrame()
+
+    can_buy_count = int((decision_df["Можно закупать"] == "Да").sum()) if not decision_df.empty else 0
+    hot_count = int((decision_df["Ходовой"] == "Да").sum()) if not decision_df.empty else 0
+    dead_count = int((decision_df["Залежался"] == "Да").sum()) if not decision_df.empty else 0
+    ready_count = int((decision_df["Готов к размещению"] == "Да").sum()) if not decision_df.empty else 0
+
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Позиций", len(products_df))
+    m2.metric("Можно закупать", can_buy_count)
+    m3.metric("Ходовые", hot_count)
+    m4.metric("Залежалые", dead_count)
+    m5.metric("Без фото", int(quality.get("without_photo", 0)))
+    m6.metric("Готово к размещению", ready_count)
+
+    render_info_banner(
+        "Как читать этот экран",
+        "Сначала смотри 'Сегодня' и 'Цена и рынок', потом 'Склад и спрос', а уже после этого 'Качество' и 'Аккаунты / серии'. Так ты быстрее поймёшь, что именно делать по листу прямо сейчас.",
+        icon="🧠",
+        chips=[f"лист: {sheet_label}", "read-only analytics", "поверх старого ядра"],
+        tone="green",
+    )
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Сегодня", "Цена и рынок", "Склад и спрос", "Качество", "Аккаунты / серии"])
+
+    with tab1:
+        if isinstance(tasks_df, pd.DataFrame) and not tasks_df.empty:
+            st.markdown("#### Что делать сегодня")
+            st.dataframe(tasks_df, use_container_width=True, hide_index=True)
+        today_rows = []
+        for label, df_slice, note in [
+            ("Можно брать", filter_procurement_queue(decision_df, "Можно брать"), "Ходовые позиции с выгодным входом от поставщика"),
+            ("К пополнению", filter_procurement_queue(decision_df, "К пополнению"), "Товар продаётся, запас проседает"),
+            ("Требует цены", filter_procurement_queue(decision_df, "Требует цены"), "Наша цена выше рынка или запас залежался"),
+            ("Без фото", filter_procurement_queue(decision_df, "Без фото"), "Нужно дотянуть карточки"),
+            ("Без Avito", filter_procurement_queue(decision_df, "Без Avito"), "Есть товар, но нет размещения"),
+        ]:
+            today_rows.append({"Очередь": label, "Позиций": len(df_slice), "Что делать": note})
+        st.dataframe(pd.DataFrame(today_rows), use_container_width=True, hide_index=True)
+        hot_view = decision_df[decision_df["Ходовой"] == "Да"].head(30)
+        if not hot_view.empty:
+            st.markdown("#### Ходовые позиции")
+            st.dataframe(hot_view[[c for c in ["Артикул", "Товар", "Продажи, шт/мес", "Запас, мес", "Лучший поставщик", "Цена поставщика", "Разница, %", "Решение"] if c in hot_view.columns]], use_container_width=True, hide_index=True, height=380)
+
+    with tab2:
+        if isinstance(top_df, pd.DataFrame) and not top_df.empty:
+            st.markdown("#### Приоритет на пересмотр цены")
+            st.dataframe(top_df[[c for c in ["Артикул", "Название", "Продажи, шт/мес", "Наш запас, мес", "Наша цена", "Лучшая цена дистрибьютора", "Рекомендую, руб", "Лучший поставщик", "Разница, руб", "Разница, %"] if c in top_df.columns]].head(150), use_container_width=True, hide_index=True, height=460)
+        else:
+            st.info("На текущем листе нет позиций, где рынок дешевле нас.")
+        if isinstance(source_df, pd.DataFrame) and not source_df.empty:
+            st.markdown("#### Кто чаще всего лучший по цене")
+            st.dataframe(source_df, use_container_width=True, hide_index=True)
+        if isinstance(patch_history_df, pd.DataFrame) and not patch_history_df.empty:
+            st.markdown("#### Последние ручные правки цены")
+            st.dataframe(patch_history_df[[c for c in ["changed_at", "article", "sheet_name", "old_price", "new_price", "change_source", "note"] if c in patch_history_df.columns]].head(40), use_container_width=True, hide_index=True, height=320)
+
+    with tab3:
+        low_stock_df = decision_df[decision_df["Низкий запас"] == "Да"].copy()
+        dead_stock_df = decision_df[decision_df["Залежался"] == "Да"].copy()
+        overstock_df = decision_df[decision_df["Избыточный запас"] == "Да"].copy()
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Низкий запас", len(low_stock_df))
+        s2.metric("Избыточный запас", len(overstock_df))
+        s3.metric("Залежалый остаток", len(dead_stock_df))
+        if not low_stock_df.empty:
+            st.markdown("#### Нужно пополнение")
+            st.dataframe(low_stock_df[[c for c in ["Артикул", "Товар", "Наш остаток", "Продажи, шт/мес", "Запас, мес", "Лучший поставщик", "Цена поставщика", "Разница, %", "Решение"] if c in low_stock_df.columns]].head(120), use_container_width=True, hide_index=True, height=360)
+        if not dead_stock_df.empty:
+            st.markdown("#### Залежалый склад")
+            st.dataframe(dead_stock_df[[c for c in ["Артикул", "Товар", "Наш остаток", "Продажи, шт/мес", "Запас, мес", "Решение", "Почему"] if c in dead_stock_df.columns]].head(120), use_container_width=True, hide_index=True, height=360)
+        elif low_stock_df.empty:
+            st.info("По текущему листу нет явных проблем по запасу.")
+
+    with tab4:
+        if isinstance(quality_df, pd.DataFrame) and not quality_df.empty:
+            st.markdown("#### Покрытие качества карточек")
+            st.dataframe(quality_df, use_container_width=True, hide_index=True)
+        no_photo_df = filter_procurement_queue(decision_df, "Без фото")
+        no_avito_df = filter_procurement_queue(decision_df, "Без Avito")
+        ready_df = filter_procurement_queue(decision_df, "Готово к размещению")
+        q1, q2, q3 = st.columns(3)
+        q1.metric("Без фото", len(no_photo_df))
+        q2.metric("Без Avito", len(no_avito_df))
+        q3.metric("Готово к размещению", len(ready_df))
+        if not no_photo_df.empty:
+            st.markdown("#### Позиции без фото")
+            st.dataframe(no_photo_df[[c for c in ["Артикул", "Товар", "Наш остаток", "Есть Avito", "Решение", "Почему"] if c in no_photo_df.columns]].head(120), use_container_width=True, hide_index=True, height=320)
+        if not no_avito_df.empty:
+            st.markdown("#### Позиции без Avito")
+            st.dataframe(no_avito_df[[c for c in ["Артикул", "Товар", "Наш остаток", "Есть фото", "Готов к размещению", "Решение"] if c in no_avito_df.columns]].head(120), use_container_width=True, hide_index=True, height=320)
+
+    with tab5:
+        if isinstance(account_df, pd.DataFrame) and not account_df.empty:
+            st.markdown("#### Аналитика по аккаунтам Avito")
+            st.dataframe(account_df, use_container_width=True, hide_index=True)
+        else:
+            st.caption("В Avito пока нет данных по аккаунтам для этого листа.")
+        if isinstance(series_df, pd.DataFrame) and not series_df.empty:
+            st.markdown("#### Серийная аналитика")
+            st.dataframe(series_df.head(120), use_container_width=True, hide_index=True, height=380)
+        else:
+            st.caption("На текущем листе не найдено серий, требующих отдельной сводки.")
+
+    export_bundle = bundle if isinstance(bundle, dict) else {}
+    if export_bundle:
+        st.download_button(
+            "⬇️ Скачать аналитику в Excel",
+            analytics_bundle_to_excel_bytes(export_bundle),
+            file_name=f"analytics_workspace_{sheet_name}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key=f"download_analytics_workspace_{sheet_name}",
+        )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
 def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> None:
     search_key = f"search_input_{tab_key}"
     search_widget_key = f"search_input_widget_{tab_key}"
@@ -8298,7 +8448,7 @@ else:
     mode_col, switch_l, switch_m, switch_r = st.columns([1.8, 3.2, 1.25, 1.25])
     mode_col.radio(
         "Режим",
-        options=["Каталог", "CRM workspace"],
+        options=["Каталог", "CRM workspace", "Аналитика"],
         key="app_mode_main",
         horizontal=True,
         label_visibility="collapsed",
@@ -8330,6 +8480,19 @@ else:
             st.warning("Включён безопасный запуск. Основные тяжёлые блоки временно отключены. Открой 🛡️ Сервисный режим в боковой панели, чтобы проверить систему, восстановить snapshot или выключить safe boot.")
         else:
             render_crm_workspace(
+                active_sheet_df,
+                st.session_state.get("photo_df"),
+                st.session_state.get("avito_df"),
+                active_sheet_name,
+                active_tab_label,
+                float(st.session_state.get("distributor_min_qty", 1.0) or 1.0),
+            )
+    elif st.session_state.get("app_mode_main") == "Аналитика":
+        st.caption("ⓘ Аналитика — отдельный рабочий экран поверх текущего листа: рынок, спрос, запас, качество карточек и действия закупщика. Каталог и CRM ниже не рендерятся.")
+        if is_service_safe_boot_enabled():
+            st.warning("Включён безопасный запуск. Основные тяжёлые блоки временно отключены. Открой 🛡️ Сервисный режим в боковой панели, чтобы проверить систему, восстановить snapshot или выключить safe boot.")
+        else:
+            render_analytics_workspace(
                 active_sheet_df,
                 st.session_state.get("photo_df"),
                 st.session_state.get("avito_df"),
