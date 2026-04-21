@@ -734,15 +734,70 @@ def normalize_watchlist_sheet_name(value: Any) -> str:
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=4)
 def load_hot_watchlist_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     suffix = Path(file_name).suffix.lower()
-    if suffix == ".csv":
-        bio = io.BytesIO(file_bytes)
-        try:
-            raw = pd.read_csv(bio)
-        except UnicodeDecodeError:
+
+    def _read_csv_bytes(raw_bytes: bytes) -> pd.DataFrame:
+        bio = io.BytesIO(raw_bytes)
+        for enc in [None, "utf-8-sig", "cp1251", "windows-1251"]:
+            try:
+                bio.seek(0)
+                if enc is None:
+                    return pd.read_csv(bio)
+                return pd.read_csv(bio, encoding=enc)
+            except UnicodeDecodeError:
+                continue
+            except Exception:
+                continue
+        bio.seek(0)
+        return pd.read_csv(bio, encoding="cp1251")
+
+    def _read_excel_bytes(raw_bytes: bytes, ext: str) -> pd.DataFrame:
+        bio = io.BytesIO(raw_bytes)
+
+        # xlsx/xlsm — читаем через openpyxl, чтобы не зависеть от auto-detect pandas
+        if ext in {".xlsx", ".xlsm"} or raw_bytes[:2] == b"PK":
             bio.seek(0)
-            raw = pd.read_csv(bio, encoding="cp1251")
+            return pd.read_excel(bio, engine="openpyxl")
+
+        # старый .xls на Streamlit Cloud без xlrd не читается.
+        # Пробуем 2 безопасных fallback:
+        # 1) openpyxl — если файл просто ошибочно назван .xls
+        # 2) html table — некоторые старые выгрузки Avito/Excel так сохраняются
+        if ext == ".xls":
+            try:
+                bio.seek(0)
+                return pd.read_excel(bio, engine="openpyxl")
+            except Exception:
+                pass
+            try:
+                html_tables = pd.read_html(io.BytesIO(raw_bytes))
+                if html_tables:
+                    return html_tables[0]
+            except Exception:
+                pass
+            raise ValueError(
+                "Watchlist в старом формате .xls. На сервере он не читается без xlrd. "
+                "Сохрани файл как .xlsx или .csv и загрузи снова."
+            )
+
+        # Последняя попытка для файлов без нормального suffix
+        try:
+            bio.seek(0)
+            return pd.read_excel(bio, engine="openpyxl")
+        except Exception:
+            pass
+        try:
+            html_tables = pd.read_html(io.BytesIO(raw_bytes))
+            if html_tables:
+                return html_tables[0]
+        except Exception:
+            pass
+        raise ValueError("Не удалось распознать формат watchlist-файла. Используй .xlsx или .csv.")
+
+    if suffix == ".csv":
+        raw = _read_csv_bytes(file_bytes)
     else:
-        raw = pd.read_excel(io.BytesIO(file_bytes))
+        raw = _read_excel_bytes(file_bytes, suffix)
+
     raw = raw.dropna(how="all").copy()
     if raw.empty:
         return pd.DataFrame(columns=[
