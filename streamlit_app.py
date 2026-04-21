@@ -7589,6 +7589,13 @@ def build_crm_workspace_products_df(
         supplier_debug_rows = build_supplier_debug_rows(row, min_qty=min_qty)
         supplier_valid_offers = get_row_offers(row, min_qty=min_qty)
 
+        purchase_avg_cost = safe_float(row.get("purchase_avg_cost"), 0.0)
+        purchase_total_qty = safe_float(row.get("purchase_total_qty"), 0.0)
+        purchase_total_cost = safe_float(row.get("purchase_total_cost"), 0.0)
+        purchase_match_source = normalize_text(row.get("purchase_match_source", ""))
+        purchase_source_name = normalize_text(row.get("purchase_source_name", ""))
+        purchase_source_sheet = normalize_text(row.get("purchase_source_sheet", ""))
+
         priority = 0.0
         priority += hot_priority_score
         if can_buy:
@@ -7640,11 +7647,11 @@ def build_crm_workspace_products_df(
             "name": name,
             "sale_price": own_price,
             "purchase_avg_cost": purchase_avg_cost if purchase_avg_cost > 0 else None,
-            "purchase_total_qty": safe_float(row.get("purchase_total_qty"), 0.0) if safe_float(row.get("purchase_total_qty"), 0.0) > 0 else None,
-            "purchase_total_cost": safe_float(row.get("purchase_total_cost"), 0.0) if safe_float(row.get("purchase_total_cost"), 0.0) > 0 else None,
-            "purchase_match_source": normalize_text(row.get("purchase_match_source", "")),
-            "purchase_source_name": normalize_text(row.get("purchase_source_name", "")),
-            "purchase_source_sheet": normalize_text(row.get("purchase_source_sheet", "")),
+            "purchase_total_qty": purchase_total_qty if purchase_total_qty > 0 else None,
+            "purchase_total_cost": purchase_total_cost if purchase_total_cost > 0 else None,
+            "purchase_match_source": purchase_match_source,
+            "purchase_source_name": purchase_source_name,
+            "purchase_source_sheet": purchase_source_sheet,
             "free_qty": own_qty,
             "total_qty": total_qty,
             "transit_qty": transit_qty,
