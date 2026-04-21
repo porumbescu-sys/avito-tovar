@@ -8036,20 +8036,9 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
                     tech = tech[["article", "name", "Наша цена", "Наш склад", "Лучший поставщик", "Лучшая цена", "Фото"]].rename(columns={"article": "Артикул", "name": "Название"})
                 st.dataframe(tech, use_container_width=True, hide_index=True)
 
-            render_crm_card_center(
-                result_df,
-                display_result_df,
-                compare_map,
-                st.session_state.get("avito_df"),
-                sheet_name,
-                tab_label,
-                tab_key,
-                price_mode,
-                round100,
-                custom_discount,
-            )
-
-            render_card_editor_panel(display_result_df, sheet_name, tab_key)
+            # CRM-карточка и редактор убраны из каталожного поиска.
+            # Теперь этот блок открывается только внутри CRM workspace,
+            # чтобы не дублироваться и не замедлять обычный поиск.
 
             lazy_c0, lazy_c1, lazy_c2, lazy_c3, lazy_c4, lazy_c5 = st.columns(6)
             lazy_c0.checkbox(
