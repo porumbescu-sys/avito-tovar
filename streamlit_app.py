@@ -7950,9 +7950,9 @@ def render_crm_workspace_queues(products_df: pd.DataFrame) -> None:
     row = row_map[pick]
     c1, c2, c3, c4 = st.columns(4)
     if c1.button("Открыть в CRM-карточке", use_container_width=True, key="crm_queue_open_card"):
-        open_product_in_crm(normalize_text(row.get("article_norm", "")), sheet_label=normalize_text(row.get("Лист", sheet_label)), open_photo_editor=False)
+        open_product_in_crm(normalize_text(row.get("article_norm", "")), sheet_label=normalize_text(row.get("Лист", row.get("sheet_label", "Оригинал"))), open_photo_editor=False)
     if c2.button("Открыть и редактировать фото", use_container_width=True, key="crm_queue_open_photo_editor"):
-        open_product_in_crm(normalize_text(row.get("article_norm", "")), sheet_label=normalize_text(row.get("Лист", sheet_label)), open_photo_editor=True)
+        open_product_in_crm(normalize_text(row.get("article_norm", "")), sheet_label=normalize_text(row.get("Лист", row.get("sheet_label", "Оригинал"))), open_photo_editor=True)
     if c3.button("Открыть в каталоге", use_container_width=True, key="crm_queue_open_catalog"):
         open_product_in_catalog(normalize_text(row.get("Артикул", "")), normalize_text(row.get("Лист", "Оригинал")))
     if c4.button("В работу", use_container_width=True, key="crm_queue_in_work"):
