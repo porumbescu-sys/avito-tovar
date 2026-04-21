@@ -31,7 +31,7 @@ import streamlit.components.v1 as components
 st.set_page_config(page_title="Мой Товар", page_icon="📦", layout="wide")
 
 APP_TITLE = "Мой Товар"
-APP_VERSION = "v54.7.0-crm-workspace"
+APP_VERSION = "v54.8.0-crm-purchase-cost"
 
 
 SERVER_DATA_DIRNAME = "data"
@@ -39,6 +39,7 @@ PERSISTED_PHOTO_FILENAME = "photo_catalog_latest.xlsx"
 PERSISTED_AVITO_FILENAME = "avito_latest.xlsx"
 PERSISTED_COMPARISON_FILENAME = "comparison_latest.xlsx"
 PERSISTED_WATCHLIST_FILENAME = "hot_items_watchlist_latest.dat"
+PERSISTED_PURCHASE_FILENAME = "weighted_purchase_latest.xlsx"
 PERSISTED_META_SUFFIX = ".meta.json"
 
 FALLBACK_PHOTO_DOMAINS = ["rashodniki.ru", "t-toner.ru", "interlink.ru", "mrimage.ru"]
@@ -68,6 +69,10 @@ def get_persisted_comparison_file_path() -> Path:
 
 def get_persisted_watchlist_file_path() -> Path:
     return get_server_data_dir() / PERSISTED_WATCHLIST_FILENAME
+
+
+def get_persisted_purchase_file_path() -> Path:
+    return get_server_data_dir() / PERSISTED_PURCHASE_FILENAME
 
 
 def get_persisted_meta_path(file_path: Path) -> Path:
@@ -113,6 +118,10 @@ def clear_loader_caches() -> None:
         pass
     try:
         load_hot_watchlist_file.clear()
+    except Exception:
+        pass
+    try:
+        load_purchase_cost_file.clear()
     except Exception:
         pass
 
@@ -223,6 +232,7 @@ def get_service_live_file_entries() -> list[dict[str, Any]]:
     photo = get_persisted_photo_file_path()
     avito = get_persisted_avito_file_path()
     watchlist = get_persisted_watchlist_file_path()
+    purchase = get_persisted_purchase_file_path()
     entries = [
         {"label": "comparison", "path": comparison},
         {"label": "comparison_meta", "path": get_persisted_meta_path(comparison)},
@@ -232,6 +242,8 @@ def get_service_live_file_entries() -> list[dict[str, Any]]:
         {"label": "avito_meta", "path": get_persisted_meta_path(avito)},
         {"label": "watchlist", "path": watchlist},
         {"label": "watchlist_meta", "path": get_persisted_meta_path(watchlist)},
+        {"label": "purchase", "path": purchase},
+        {"label": "purchase_meta", "path": get_persisted_meta_path(purchase)},
         {"label": "review_tasks_db", "path": _service_db_path("review_tasks.sqlite")},
         {"label": "avito_registry_db", "path": _service_db_path("avito_registry.sqlite")},
         {"label": "photo_registry_db", "path": _service_db_path("photo_registry.sqlite")},
@@ -383,12 +395,13 @@ def restore_service_snapshot(snapshot_name: str) -> dict[str, Any]:
         "photo_df", "photo_name", "photo_last_sync_sig", "photo_registry_message", "photo_registry_stats",
         "avito_df", "avito_name", "avito_last_sync_sig", "avito_registry_message", "avito_registry_stats",
         "hot_items_df", "hot_items_name", "hot_items_last_sync_sig",
+        "purchase_cost_df", "purchase_cost_name", "purchase_cost_last_sync_sig",
         "patch_message",
         "last_result_original", "last_result_discount", "last_result_compatible",
         "last_result_sig_original", "last_result_sig_discount", "last_result_sig_compatible",
-        "comparison_upload_applied_sig", "photo_upload_applied_sig", "avito_upload_applied_sig", "hot_upload_applied_sig",
+        "comparison_upload_applied_sig", "photo_upload_applied_sig", "avito_upload_applied_sig", "hot_upload_applied_sig", "purchase_upload_applied_sig",
         "service_snapshot_sig__comparison_upload", "service_snapshot_sig__photo_upload",
-        "service_snapshot_sig__avito_upload", "service_snapshot_sig__watchlist_upload",
+        "service_snapshot_sig__avito_upload", "service_snapshot_sig__watchlist_upload", "service_snapshot_sig__purchase_upload",
     ]:
         st.session_state.pop(key, None)
 
@@ -486,6 +499,16 @@ def run_service_healthcheck() -> dict[str, Any]:
             checks.append({"name": "watchlist", "status": "fail", "details": f"ошибка загрузки: {normalize_text(exc)}"})
     else:
         checks.append({"name": "watchlist", "status": "warn", "details": "файл не найден"})
+
+    purchase_path = get_persisted_purchase_file_path()
+    if purchase_path.exists():
+        try:
+            purchase_df = load_purchase_cost_file(read_persisted_original_name(purchase_path, purchase_path.name), purchase_path.read_bytes())
+            checks.append({"name": "purchase cost", "status": "ok", "details": f"ok • строк: {len(purchase_df)}"})
+        except Exception as exc:
+            checks.append({"name": "purchase cost", "status": "fail", "details": f"ошибка загрузки: {normalize_text(exc)}"})
+    else:
+        checks.append({"name": "purchase cost", "status": "warn", "details": "файл не найден"})
 
     avito_path = get_persisted_avito_file_path()
     if avito_path.exists():
@@ -1105,6 +1128,200 @@ def load_persisted_watchlist_source_into_state() -> bool:
         return True
     except Exception:
         return False
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=4)
+def load_purchase_cost_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
+    suffix = Path(file_name).suffix.lower()
+    bio = io.BytesIO(file_bytes)
+    engine = "openpyxl" if suffix in {".xlsx", ".xlsm"} or file_bytes[:2] == b"PK" else None
+    try:
+        xls = pd.ExcelFile(bio, engine=engine)
+    except Exception:
+        bio.seek(0)
+        xls = pd.ExcelFile(bio)
+
+    target_sheet = None
+    for sheet in xls.sheet_names:
+        sheet_txt = contains_text(sheet)
+        if "ИТОГ" in sheet_txt and "ВЗВЕШ" in sheet_txt:
+            target_sheet = sheet
+            break
+    if target_sheet is None:
+        target_sheet = xls.sheet_names[0]
+
+    raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name=target_sheet, engine="openpyxl" if engine == "openpyxl" else None)
+    raw = raw.dropna(how="all").copy()
+    if raw.empty:
+        return pd.DataFrame(columns=[
+            "purchase_name", "purchase_name_compact", "purchase_codes", "purchase_codes_text",
+            "purchase_avg_cost", "purchase_total_qty", "purchase_total_cost", "purchase_source_sheet",
+            "purchase_match_hint"
+        ])
+
+    raw.columns = [normalize_text(c) for c in raw.columns]
+    col_name = next((c for c in raw.columns if compact_text(c) in {"НОМЕНКЛАТУРА(B)", "НОМЕНКЛАТУРА", "НАИМЕНОВАНИЕ", "НАЗВАНИЕ"}), "")
+    col_avg = next((c for c in raw.columns if "СРЕДНЯЯ" in contains_text(c) and "1" in contains_text(c)), "")
+    if not col_avg:
+        col_avg = next((c for c in raw.columns if "ЗАКУПК" in contains_text(c) and "1" in contains_text(c)), "")
+    col_qty = next((c for c in raw.columns if "ОБЩЕЕ" in contains_text(c) and ("КОЛ" in contains_text(c) or "ШТ" in contains_text(c))), "")
+    col_total = next((c for c in raw.columns if ("СКОРР" in contains_text(c) or "СУММ" in contains_text(c)) and "ЗАКУПК" in contains_text(c)), "")
+
+    if not col_name or not col_avg:
+        raise ValueError("В файле закупки не найдены колонки номенклатуры и средней закупки.")
+
+    rows = []
+    for _, r in raw.iterrows():
+        purchase_name = normalize_text(r.get(col_name, ""))
+        purchase_avg_cost = safe_float(r.get(col_avg), 0.0)
+        if not purchase_name or purchase_avg_cost <= 0:
+            continue
+        codes = build_row_compare_codes("", purchase_name)
+        rows.append({
+            "purchase_name": purchase_name,
+            "purchase_name_compact": compact_text(purchase_name),
+            "purchase_codes": codes,
+            "purchase_codes_text": "|" + "|".join(codes) + "|" if codes else "",
+            "purchase_avg_cost": purchase_avg_cost,
+            "purchase_total_qty": safe_float(r.get(col_qty), 0.0) if col_qty else 0.0,
+            "purchase_total_cost": safe_float(r.get(col_total), 0.0) if col_total else 0.0,
+            "purchase_source_sheet": target_sheet,
+            "purchase_match_hint": "title_or_code",
+            "purchase_name_tokens": tokenize_text(purchase_name),
+        })
+    return pd.DataFrame(rows)
+
+
+def load_persisted_purchase_source_into_state() -> bool:
+    target = get_persisted_purchase_file_path()
+    if not target.exists():
+        return False
+    try:
+        raw = target.read_bytes()
+        st.session_state.purchase_cost_df = load_purchase_cost_file(read_persisted_original_name(target, target.name), raw)
+        st.session_state.purchase_cost_name = read_persisted_original_name(target, target.name) + " • из /data"
+        return True
+    except Exception:
+        return False
+
+
+def purchase_cost_summary_text() -> str:
+    purchase_df = st.session_state.get("purchase_cost_df")
+    if not isinstance(purchase_df, pd.DataFrame) or purchase_df.empty:
+        return "Средняя закупка: файл ещё не загружен"
+    sheet_name = normalize_text(purchase_df.get("purchase_source_sheet", pd.Series(dtype=object)).iloc[0]) if "purchase_source_sheet" in purchase_df.columns and len(purchase_df) else ""
+    return f"Средняя закупка: {len(purchase_df)} строк • лист: {sheet_name or '—'}"
+
+
+def _purchase_match_score(product_name: str, candidate: dict[str, Any]) -> tuple[float, float, int]:
+    target_tokens = set(tokenize_text(product_name))
+    cand_tokens = set(candidate.get("purchase_name_tokens", []) or [])
+    inter = len(target_tokens & cand_tokens)
+    union = len(target_tokens | cand_tokens) or 1
+    jaccard = inter / union
+    target_comp = compact_text(product_name)
+    cand_comp = normalize_text(candidate.get("purchase_name_compact", ""))
+    prefix = 1.0 if (target_comp and (target_comp in cand_comp or cand_comp in target_comp)) else 0.0
+    return (prefix, jaccard, inter)
+
+
+def build_purchase_cost_indexes(purchase_df: pd.DataFrame | None) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    if not isinstance(purchase_df, pd.DataFrame) or purchase_df.empty:
+        return {}, {}
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    by_code: dict[str, list[dict[str, Any]]] = {}
+    for _, r in purchase_df.iterrows():
+        rec = r.to_dict()
+        name_key = normalize_text(rec.get("purchase_name_compact", ""))
+        if name_key:
+            by_name.setdefault(name_key, []).append(rec)
+        for code in rec.get("purchase_codes", []) or []:
+            code_norm = normalize_article(code)
+            if code_norm:
+                by_code.setdefault(code_norm, []).append(rec)
+    return by_name, by_code
+
+
+def resolve_purchase_cost_for_product(article: object, name: object, purchase_by_name: dict[str, list[dict[str, Any]]], purchase_by_code: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    article_norm = normalize_article(article)
+    name_compact = compact_text(name)
+    default = {
+        "purchase_avg_cost": None,
+        "purchase_total_qty": None,
+        "purchase_total_cost": None,
+        "purchase_match_source": "",
+        "purchase_source_name": "",
+        "purchase_source_sheet": "",
+    }
+
+    exact_name = purchase_by_name.get(name_compact, [])
+    if len(exact_name) == 1:
+        rec = exact_name[0]
+        return {
+            "purchase_avg_cost": safe_float(rec.get("purchase_avg_cost"), 0.0),
+            "purchase_total_qty": safe_float(rec.get("purchase_total_qty"), 0.0),
+            "purchase_total_cost": safe_float(rec.get("purchase_total_cost"), 0.0),
+            "purchase_match_source": "name_exact",
+            "purchase_source_name": normalize_text(rec.get("purchase_name", "")),
+            "purchase_source_sheet": normalize_text(rec.get("purchase_source_sheet", "")),
+        }
+
+    code_matches = purchase_by_code.get(article_norm, []) if article_norm else []
+    if len(code_matches) == 1:
+        rec = code_matches[0]
+        return {
+            "purchase_avg_cost": safe_float(rec.get("purchase_avg_cost"), 0.0),
+            "purchase_total_qty": safe_float(rec.get("purchase_total_qty"), 0.0),
+            "purchase_total_cost": safe_float(rec.get("purchase_total_cost"), 0.0),
+            "purchase_match_source": "code_from_name",
+            "purchase_source_name": normalize_text(rec.get("purchase_name", "")),
+            "purchase_source_sheet": normalize_text(rec.get("purchase_source_sheet", "")),
+        }
+    if len(code_matches) > 1:
+        scored = sorted(
+            code_matches,
+            key=lambda rec: _purchase_match_score(normalize_text(name), rec),
+            reverse=True,
+        )
+        best = scored[0] if scored else None
+        if best is not None:
+            prefix, jaccard, inter = _purchase_match_score(normalize_text(name), best)
+            if prefix > 0 or jaccard >= 0.45 or inter >= 3:
+                return {
+                    "purchase_avg_cost": safe_float(best.get("purchase_avg_cost"), 0.0),
+                    "purchase_total_qty": safe_float(best.get("purchase_total_qty"), 0.0),
+                    "purchase_total_cost": safe_float(best.get("purchase_total_cost"), 0.0),
+                    "purchase_match_source": "code_best_name",
+                    "purchase_source_name": normalize_text(best.get("purchase_name", "")),
+                    "purchase_source_sheet": normalize_text(best.get("purchase_source_sheet", "")),
+                }
+    return default
+
+
+def apply_purchase_cost_map(df: pd.DataFrame | None, purchase_df: pd.DataFrame | None) -> pd.DataFrame | None:
+    if df is None:
+        return None
+    out = df.copy()
+    for col in ["purchase_avg_cost", "purchase_total_qty", "purchase_total_cost", "purchase_match_source", "purchase_source_name", "purchase_source_sheet"]:
+        if col not in out.columns:
+            out[col] = None if "cost" in col or "qty" in col else ""
+    if not isinstance(purchase_df, pd.DataFrame) or purchase_df.empty:
+        return out
+    purchase_by_name, purchase_by_code = build_purchase_cost_indexes(purchase_df)
+    resolved = out.apply(
+        lambda r: resolve_purchase_cost_for_product(
+            r.get("article", ""),
+            r.get("name", ""),
+            purchase_by_name,
+            purchase_by_code,
+        ),
+        axis=1,
+    )
+    resolved_df = pd.DataFrame(list(resolved))
+    for col in ["purchase_avg_cost", "purchase_total_qty", "purchase_total_cost", "purchase_match_source", "purchase_source_name", "purchase_source_sheet"]:
+        if col in resolved_df.columns:
+            out[col] = resolved_df[col]
+    return out
 
 DEFAULT_DISCOUNT_1 = 12.0
 DEFAULT_DISCOUNT_2 = 20.0
@@ -3480,22 +3697,19 @@ def render_crm_issue_open_helper(
         return
     c1, c2 = st.columns([4, 1.3])
     selected_label = c1.selectbox(
-        "Открыть позицию",
+        "Открыть позицию в CRM",
         labels,
         key=f"crm_issue_open_select_{box_key}_{tab_key}",
         help=(
-            "Открывает позицию в CRM или в обычном поиске. "
-            "Для блока без фото лучше сразу идти в CRM-карточку."
+            "Открывает позицию сразу в новой CRM-карточке. "
+            "Для блока без фото можно сразу перейти в редактор фото."
         ),
     )
     if c2.button(button_text, key=f"crm_issue_open_btn_{box_key}_{tab_key}", use_container_width=True):
         row = row_map.get(selected_label, {})
         article = normalize_text(row.get("Артикул", ""))
         sheet_label = normalize_text(row.get("Лист", "")) or tabkey_to_label.get(normalize_text(tab_key), "Оригинал")
-        if open_editor:
-            open_product_in_crm(article, sheet_label=sheet_label, open_photo_editor=True)
-        else:
-            trigger_search_from_article(article, tab_key)
+        open_product_in_crm(article, sheet_label=sheet_label, open_photo_editor=bool(open_editor))
 
 
 def render_crm_quality_issue_lazy_panels(
@@ -3542,7 +3756,7 @@ def render_crm_quality_issue_lazy_panels(
             title,
             subtitle,
             icon=icon,
-            help_text="Это ленивый поверхностный инструмент CRM. Он ничего не меняет в ядре, а только помогает открыть нужные позиции в обычном поиске.",
+            help_text="Это ленивый поверхностный инструмент CRM. Он ничего не меняет в ядре, а только помогает открыть нужные позиции сразу в новой CRM-карточке.",
         )
         if issue_df.empty:
             st.info("По текущему листу строк не найдено.")
@@ -3569,7 +3783,7 @@ def render_crm_quality_issue_lazy_panels(
         _render_issue_panel(
             no_photo_df,
             f"Нет фото — позиции для доработки ({len(no_photo_df)})",
-            "Показывает только позиции текущего листа без фото. Можно быстро открыть товар в обычном поиске и сразу поправить карточку.",
+            "Показывает только позиции текущего листа без фото. Можно сразу открыть товар в новой CRM-карточке и быстро добавить ссылку на фото.",
             icon="🖼️",
             box_key="crm_no_photo",
             button_text="Открыть и редактировать",
@@ -3584,7 +3798,7 @@ def render_crm_quality_issue_lazy_panels(
         _render_issue_panel(
             no_avito_df,
             f"Без Avito — позиции для размещения ({len(no_avito_df)})",
-            "Показывает только позиции текущего листа без объявлений Avito. Можно быстро открыть позицию в обычном поиске и перейти к шаблону/размещению.",
+            "Показывает только позиции текущего листа без объявлений Avito. Можно сразу открыть позицию в новой CRM-карточке и перейти к размещению.",
             icon="🛒",
             box_key="crm_no_avito",
             button_text="Открыть",
@@ -5809,6 +6023,41 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
+    render_sidebar_card_header("Средняя закупка", "💳", "Отдельный файл со средневзвешенной закупкой за 1 шт. Используется только поверх CRM-карточки и не ломает старое ядро comparison.")
+    purchase_uploaded = st.file_uploader(
+        "Загрузить файл средней закупки",
+        type=["xlsx", "xlsm"],
+        key="purchase_cost_uploader",
+        label_visibility="collapsed",
+        help="Файл закупки, где есть лист Итог_взвешенный и колонка «Средняя закупка за 1 шт». Маппинг идёт по названию и коду, извлечённому из номенклатуры.",
+    )
+    st.caption("ⓘ Берём лист «Итог_взвешенный». Артикулов в файле нет, поэтому маппинг идёт безопасно по названию и коду внутри номенклатуры.")
+    if purchase_uploaded is not None:
+        try:
+            purchase_bytes = purchase_uploaded.getvalue()
+            purchase_sig = hashlib.md5(purchase_bytes).hexdigest()
+            if st.session_state.get("purchase_upload_applied_sig", "") != purchase_sig:
+                maybe_create_service_snapshot_before_action("purchase_upload", purchase_sig, f"before purchase upload: {purchase_uploaded.name}")
+                save_uploaded_source_file(get_persisted_purchase_file_path(), purchase_bytes, purchase_uploaded.name)
+                clear_loader_caches()
+                st.session_state.purchase_cost_df = load_purchase_cost_file(purchase_uploaded.name, purchase_bytes)
+                st.session_state.purchase_cost_name = purchase_uploaded.name + " • сохранён в /data"
+                st.session_state.purchase_cost_last_sync_sig = purchase_sig
+                st.session_state["purchase_upload_applied_sig"] = purchase_sig
+                log_operation(f"Обновлён файл средней закупки: {purchase_uploaded.name}", "success")
+        except Exception as exc:
+            log_operation(f"Ошибка файла средней закупки: {exc}", "warning")
+            st.error(f"Ошибка файла закупки: {exc}")
+    else:
+        if not isinstance(st.session_state.get("purchase_cost_df"), pd.DataFrame):
+            load_persisted_purchase_source_into_state()
+    st.markdown(f'<div class="sidebar-status">Средняя закупка: {html.escape(st.session_state.get("purchase_cost_name", "ещё не загружен"))}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sidebar-mini">Файл на сервере: {html.escape(str(get_persisted_purchase_file_path()))}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sidebar-mini">{html.escape(purchase_cost_summary_text())}</div>', unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
     render_sidebar_card_header("Отчёт и цены", "📊", "Порог выгоды и минимальный остаток для пересчёта лучшей цены.")
     st.number_input(
         "Порог отчёта, %",
@@ -6188,6 +6437,7 @@ def build_operational_analytics_bundle(
         article_norm = normalize_article(article)
         name = normalize_text(row.get("name", ""))
         own_price = safe_float(row.get("sale_price"), 0.0)
+        purchase_avg_cost = safe_float(row.get("purchase_avg_cost"), 0.0)
         own_qty = parse_qty_generic(row.get("free_qty"))
         codes = row.get("row_codes", []) or build_row_compare_codes(article, name)
         matched_ads = match_avito_candidates_for_codes(avito_index, codes)
@@ -7169,6 +7419,7 @@ def build_crm_workspace_products_df(
         return pd.DataFrame()
 
     enriched = apply_photo_map(sheet_df, photo_df)
+    enriched = apply_purchase_cost_map(enriched, st.session_state.get("purchase_cost_df")) if isinstance(enriched, pd.DataFrame) else enriched
     enriched = apply_card_overrides(enriched, sheet_name) if isinstance(enriched, pd.DataFrame) else enriched
     if not isinstance(enriched, pd.DataFrame) or enriched.empty:
         return pd.DataFrame()
@@ -7388,6 +7639,12 @@ def build_crm_workspace_products_df(
             "article_norm": article_norm,
             "name": name,
             "sale_price": own_price,
+            "purchase_avg_cost": purchase_avg_cost if purchase_avg_cost > 0 else None,
+            "purchase_total_qty": safe_float(row.get("purchase_total_qty"), 0.0) if safe_float(row.get("purchase_total_qty"), 0.0) > 0 else None,
+            "purchase_total_cost": safe_float(row.get("purchase_total_cost"), 0.0) if safe_float(row.get("purchase_total_cost"), 0.0) > 0 else None,
+            "purchase_match_source": normalize_text(row.get("purchase_match_source", "")),
+            "purchase_source_name": normalize_text(row.get("purchase_source_name", "")),
+            "purchase_source_sheet": normalize_text(row.get("purchase_source_sheet", "")),
             "free_qty": own_qty,
             "total_qty": total_qty,
             "transit_qty": transit_qty,
@@ -7807,12 +8064,13 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
     with top2:
         st.markdown(f"## {html.escape(normalize_text(row.get('article', '')))}")
         st.caption(html.escape(normalize_text(row.get("name", ""))))
-        m1, m2, m3, m4, m5 = st.columns(5)
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
         m1.metric("Наша цена", fmt_price(row.get("sale_price", 0.0)))
-        m2.metric("Наш склад", fmt_qty(row.get("free_qty", 0.0)))
-        m3.metric("Avito", safe_int(row.get("avito_count", 0), 0))
-        m4.metric("Источник meta", normalize_text(row.get("meta_source_sheet", "")) or "—")
-        m5.metric("Pipeline", normalize_text(row.get("pipeline_status", "")) or "Новая")
+        m2.metric("Закупка", fmt_price(row.get("purchase_avg_cost", 0.0)) if safe_float(row.get("purchase_avg_cost"), 0.0) > 0 else "—")
+        m3.metric("Наш склад", fmt_qty(row.get("free_qty", 0.0)))
+        m4.metric("Avito", safe_int(row.get("avito_count", 0), 0))
+        m5.metric("Источник meta", normalize_text(row.get("meta_source_sheet", "")) or "—")
+        m6.metric("Pipeline", normalize_text(row.get("pipeline_status", "")) or "Новая")
         st.success(f"Решение: {normalize_text(row.get('decision', 'Проверить вручную'))}")
         st.caption(normalize_text(row.get("decision_reason", "Недостаточно явного сигнала")))
         st.write(f"**Склад:** {normalize_text(row.get('stock_action', '')) or 'Проверить вручную'}")
@@ -7829,6 +8087,12 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         if not normalize_text(row.get('best_source', '')):
             left.caption("Сейчас дешевле нашей цены поставщика нет.")
         left.write(f"**Статус рынка:** {'ниже нас' if safe_float(row.get('market_gap_pct', 0.0), 0.0) > 0 else 'нет сигнала рынка'}")
+        if safe_float(row.get("purchase_avg_cost"), 0.0) > 0:
+            left.write(f"**Средняя закупка:** {fmt_price(row.get('purchase_avg_cost', 0.0))}")
+            left.caption(f"Источник закупки: {normalize_text(row.get('purchase_match_source', '')) or '—'} • {normalize_text(row.get('purchase_source_name', '')) or 'без названия'}")
+        else:
+            left.write("**Средняя закупка:** —")
+            left.caption("Файл средней закупки не загрузили или безопасный маппинг по названию не нашёл совпадение.")
         right.write(f"**Открытых задач:** {safe_int(row.get('open_tasks', 0), 0)}")
         right.write(f"**Продажи/мес:** {fmt_qty(row.get('sales_per_month', 0.0))}")
         right.write(f"**Запас, мес:** {fmt_qty(row.get('stock_months', '')) if row.get('stock_months', None) not in (None, '') else '—'}")
@@ -7913,6 +8177,7 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         ch2.write(f"**Габариты:** {format_meta_dimensions(row.get('meta_length', ''), row.get('meta_width', ''), row.get('meta_height', '')) or '—'}")
         st.write(f"**Подходит к моделям:** {normalize_text(row.get('meta_fits_models', '')) or '—'}")
         st.write(f"**Описание:** {normalize_text(row.get('meta_description', '')) or '—'}")
+        st.write(f"**Источник закупки:** {normalize_text(row.get('purchase_source_sheet', '')) or '—'}")
     with tab3:
         valid_offers = row.get("supplier_valid_offers", []) if isinstance(row.get("supplier_valid_offers", []), list) else []
         debug_rows = row.get("supplier_debug_rows", []) if isinstance(row.get("supplier_debug_rows", []), list) else []
