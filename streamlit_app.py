@@ -6483,6 +6483,26 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+st.markdown(r"""
+<style>
+.main-shell-card{padding:14px 16px 8px 16px;border-radius:18px;margin:6px 0 10px 0;}
+.main-shell-title{font-size:23px;}
+.main-shell-sub{font-size:12px;}
+.section-shell-card{padding:14px 16px 12px 16px;border-radius:18px;margin:10px 0 14px 0;}
+.summary-pill-row.compact-kpis{grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:8px 0 10px 0;}
+.summary-pill-row.compact-kpis .summary-pill{padding:10px 12px;border-radius:14px;}
+.summary-pill-row.compact-kpis .summary-pill-val{font-size:24px;}
+.summary-table-note{font-size:12px;color:#64748b;line-height:1.45;margin:6px 0 10px 0;}
+.series-compact-bar{display:flex;justify-content:space-between;align-items:center;gap:12px;background:#f8fbff;border:1px dashed #cbd5e1;border-radius:16px;padding:10px 12px;margin:8px 0 12px 0;}
+.series-compact-bar .title{font-size:13px;font-weight:800;color:#0f172a;}
+.series-compact-bar .sub{font-size:12px;color:#64748b;margin-top:2px;}
+.helper-box{background:#fbfdff;border:1px solid #e5edf8;border-radius:16px;padding:10px 12px;margin:10px 0 14px 0;}
+.helper-box .label{font-size:12px;font-weight:800;color:#2563eb;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;}
+.helper-box .sub{font-size:12px;color:#64748b;line-height:1.45;}
+@media (max-width: 1100px){.summary-pill-row.compact-kpis{grid-template-columns:repeat(2,minmax(0,1fr));}.series-compact-bar{flex-direction:column;align-items:flex-start;}}
+</style>
+""", unsafe_allow_html=True)
+
 def get_price_patch_history_path() -> Path:
     try:
         return Path(__file__).resolve().with_name("price_patch_history.sqlite")
@@ -9037,46 +9057,40 @@ def render_search_procurement_summary_block(
     if not isinstance(summary_df, pd.DataFrame) or summary_df.empty:
         return
 
-    compact_key = f"proc_summary_compact_{tab_key}"
-    if compact_key not in st.session_state:
-        st.session_state[compact_key] = True
-
     signal_buy = int(summary_df.get("Сигнал закупки", pd.Series(dtype=object)).fillna("").astype(str).eq("Да").sum())
     signal_raise = int(summary_df.get("Сигнал цены", pd.Series(dtype=object)).fillna("").astype(str).eq("Поднять").sum())
     risk_count = int(summary_df.get("Решение", pd.Series(dtype=object)).fillna("").astype(str).isin(["Не покупать", "Распродавать", "Держать остаток"]).sum())
 
-    st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="section-shell-card">', unsafe_allow_html=True)
     st.markdown(
         f"""
-        <div class='summary-mini-header'>
+        <div class='section-shell-top'>
           <div>
-            <div class='summary-mini-title'>{html.escape(sheet_label)} · закупочная сводка</div>
-            <div class='summary-mini-sub'>Один главный экран для принятия решения по закупке. Всё вторичное и сырое убрано в отдельные инструменты.</div>
+            <div class='section-shell-badge'>📊 Закупочная сводка</div>
+            <div class='section-shell-title'>Сразу вся ключевая информация по найденным позициям</div>
+            <div class='section-shell-sub'>Главный экран для принятия решения. CRM, сырые строки поиска и сервисные инструменты открываются отдельно, чтобы не дублировать смысл на одной странице.</div>
           </div>
-          <div class='main-shell-badge'>Для закупщика и шефа</div>
+          <div class='section-shell-side'>
+            <div class='stat-pill'>Лист: {html.escape(sheet_label)}</div>
+            <div class='stat-pill'>Позиций: {len(summary_df)}</div>
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
     st.markdown(
         f"""
-        <div class='summary-pill-row'>
-          <div class='summary-pill'><div class='summary-pill-cap'>Позиций</div><div class='summary-pill-val'>{len(summary_df)}</div></div>
+        <div class='summary-pill-row compact-kpis'>
           <div class='summary-pill'><div class='summary-pill-cap'>Вход 35%+</div><div class='summary-pill-val'>{signal_buy}</div></div>
-          <div class='summary-pill'><div class='summary-pill-cap'>Можно поднять цену</div><div class='summary-pill-val'>{signal_raise}</div></div>
+          <div class='summary-pill'><div class='summary-pill-cap'>Поднять цену</div><div class='summary-pill-val'>{signal_raise}</div></div>
           <div class='summary-pill'><div class='summary-pill-cap'>Риск / не покупать</div><div class='summary-pill-val'>{risk_count}</div></div>
+          <div class='summary-pill'><div class='summary-pill-cap'>Всего строк</div><div class='summary-pill-val'>{len(summary_df)}</div></div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-    c1, c2, c3 = st.columns([1.1, 1.15, 2.0])
-    compact_mode = c1.checkbox(
-        "Компактный вид",
-        key=compact_key,
-        help="Оставляет на главной только ключевые колонки. Полная версия таблицы открывается ниже отдельно.",
-    )
-    c2.download_button(
+    left, right = st.columns([1.15, 2.35])
+    left.download_button(
         "⬇️ Скачать сводку",
         report_to_excel_bytes(summary_df),
         file_name=f"procurement_summary_{tab_key}.xlsx",
@@ -9084,16 +9098,16 @@ def render_search_procurement_summary_block(
         use_container_width=True,
         key=f"download_procurement_summary_{tab_key}",
     )
-    c3.markdown("<div class='helper-switch-note'>Главная показывает только принятие решения. Сырой поиск, техтаблицы и вторичные инструменты живут отдельно ниже, чтобы не дублировать один и тот же смысл дважды.</div>", unsafe_allow_html=True)
+    right.markdown("<div class='summary-table-note'>На главной оставлен только компактный состав колонок. Полная версия и служебные поля ниже спрятаны отдельно.</div>", unsafe_allow_html=True)
 
-    display_cols = get_procurement_summary_display_columns(summary_df, compact=compact_mode)
-    view_df = summary_df[display_cols].copy() if display_cols else summary_df.copy()
-    st.dataframe(view_df, use_container_width=True, hide_index=True, height=min(500, 150 + len(view_df) * 35))
+    compact_cols = get_procurement_summary_display_columns(summary_df, compact=True)
+    compact_df = summary_df[compact_cols].copy() if compact_cols else summary_df.copy()
+    st.dataframe(compact_df, use_container_width=True, hide_index=True, height=min(460, 145 + len(compact_df) * 35))
 
-    with st.expander("Показать все колонки и служебные поля", expanded=False):
+    with st.expander("Показать полную сводку и служебные поля", expanded=False):
         full_cols = get_procurement_summary_display_columns(summary_df, compact=False)
         full_df = summary_df[full_cols].copy() if full_cols else summary_df.copy()
-        st.dataframe(full_df, use_container_width=True, hide_index=True, height=min(640, 160 + len(full_df) * 35))
+        st.dataframe(full_df, use_container_width=True, hide_index=True, height=min(680, 165 + len(full_df) * 35))
     st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -9165,7 +9179,6 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
             unsafe_allow_html=True,
         )
         st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown('<div class="mode-caption-bar">Главная = одна закупочная сводка под поиском. Сырые результаты, шаблоны, Avito, аналитика и отчёты открываются отдельно, чтобы не перегружать экран.</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
     result_df = st.session_state.get(result_key)
@@ -9214,10 +9227,6 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
     series_candidates = series_info.get("candidates", []) if isinstance(series_info, dict) else []
     if isinstance(base_sheet_df, pd.DataFrame) and normalize_text(submitted_query) and series_candidates:
         prefix_key = f"{tab_key}_{normalize_article(str(series_info.get('prefix', '')))}"
-        st.markdown(
-            f"<div class='admin-soft-card'><div class='admin-soft-title'>Серия {html.escape(str(series_info.get('prefix', '')))} · {len(series_candidates)} позиций</div><div class='admin-soft-sub'>Вспомогательная панель. Держим её компактной: только быстрый выбор группы и добавление в поиск без второго большого экрана.</div></div>",
-            unsafe_allow_html=True,
-        )
         options = [str(c["article_norm"]) for c in sorted(series_candidates, key=series_sort_key)]
         format_map = {}
         for c in series_candidates:
@@ -9225,8 +9234,22 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
             label = f"{c['article']} · свободно {fmt_qty(c['free_qty'])} · {fmt_price_with_rub(c['sale_price'])}"
             format_map[norm] = label
         selected_norms = st.session_state.get(f"series_selected_{prefix_key}", [])
+        st.markdown(
+            f"""
+            <div class='series-compact-bar'>
+              <div>
+                <div class='title'>Серия {html.escape(str(series_info.get('prefix', '')))} · {len(series_candidates)} позиций</div>
+                <div class='sub'>Компактный helper: можно быстро добавить всю группу в поиск, не раздувая главную страницу.</div>
+              </div>
+              <div class='main-shell-badge'>групповой поиск</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        select_all_clicked = False
+        clear_all_clicked = False
         add_clicked = False
-        with st.expander("Серия / группа по части артикула", expanded=False):
+        with st.expander("Открыть список серии", expanded=False):
             selected_norms = st.multiselect(
                 "Серия",
                 options=options,
@@ -9243,8 +9266,10 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
             add_clicked = act3.button("Добавить в поиск", use_container_width=True, key=f"series_add_{prefix_key}")
         if select_all_clicked:
             st.session_state[f"series_selected_{prefix_key}"] = [str(c["article_norm"]) for c in series_candidates]
+            st.rerun()
         if clear_all_clicked:
             st.session_state[f"series_selected_{prefix_key}"] = []
+            st.rerun()
         if add_clicked and selected_norms:
             selected_articles = []
             selected_set = set(selected_norms)
@@ -9327,17 +9352,14 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
             helper_key = f"catalog_helper_mode_{tab_key}"
             if helper_key not in st.session_state:
                 st.session_state[helper_key] = "Ничего"
-            helper_l, helper_r = st.columns([1.25, 2.75])
-            selected_helper_mode = helper_l.selectbox(
-                "Инструменты",
-                options=["Ничего", "Быстрый просмотр", "Шаблоны", "Цены у всех", "Файл для руководителя", "Avito", "Аналитика / задачи", "Отчёт по листу"],
-                key=helper_key,
-                help="На главной держим только закупочную сводку. Всё вторичное открываем отдельно и по одному.",
-            )
-            helper_r.markdown(
-                "<div class='catalog-helper-hint'>Вторичные инструменты открываются по одному: это убирает дубли, уменьшает шум и не отвлекает от основной закупочной таблицы.</div>",
-                unsafe_allow_html=True,
-            )
+            with st.expander("Дополнительные инструменты", expanded=False):
+                st.markdown("<div class='helper-box'><div class='label'>Дополнительно</div><div class='sub'>На главной оставляем только сводку. Сырой поиск, шаблоны, Avito и сервисные выгрузки открывай по одному и только когда они реально нужны.</div></div>", unsafe_allow_html=True)
+                selected_helper_mode = st.selectbox(
+                    "Инструменты",
+                    options=["Ничего", "Быстрый просмотр", "Шаблоны", "Цены у всех", "Файл для руководителя", "Avito", "Аналитика / задачи", "Отчёт по листу"],
+                    key=helper_key,
+                    help="Вторичные инструменты не держим постоянно на экране, чтобы главная оставалась лёгкой.",
+                )
 
             if selected_helper_mode == "Быстрый просмотр":
                 st.markdown('<div class="result-wrap slim-helper">', unsafe_allow_html=True)
@@ -9634,7 +9656,7 @@ else:
                 float(st.session_state.get("distributor_min_qty", 1.0) or 1.0),
             )
     else:
-        st.caption("ⓘ На главной оставили только быстрый рабочий сценарий: поиск → закупочная сводка → один вспомогательный блок по выбору. CRM, очереди и глубокая обработка вынесены в отдельный режим CRM workspace.")
+        st.caption("ⓘ Главная теперь отвечает только за быстрый сценарий: поиск → компактная закупочная сводка. CRM и глубокая обработка вынесены отдельно, чтобы не перегружать экран.")
         if is_service_safe_boot_enabled():
             st.warning("Включён безопасный запуск. Основные тяжёлые блоки временно отключены. Открой 🛡️ Сервисный режим в боковой панели, чтобы проверить систему, восстановить snapshot или выключить safe boot.")
         else:
