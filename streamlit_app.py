@@ -102,6 +102,20 @@ def save_uploaded_source_file(target_path: Path, file_bytes: bytes, original_nam
         "size": len(file_bytes),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
+def clear_runtime_perf_caches() -> None:
+    for key in [
+        "_perf_crm_products_cache",
+        "_perf_decision_cache",
+        "_perf_hot_buy_cache",
+        "_perf_analytics_bundle_cache",
+        "_perf_hot_lookup_cache",
+    ]:
+        try:
+            st.session_state.pop(key, None)
+        except Exception:
+            pass
+
+
 def clear_loader_caches() -> None:
     """Сбрасываем только тяжёлые loader-кеши после обновления server-side файлов."""
     try:
@@ -124,6 +138,204 @@ def clear_loader_caches() -> None:
         load_purchase_cost_file.clear()
     except Exception:
         pass
+    clear_runtime_perf_caches()
+
+
+def _perf_cache_bucket(name: str) -> dict[str, Any]:
+    bucket = st.session_state.get(name)
+    if not isinstance(bucket, dict):
+        bucket = {}
+        st.session_state[name] = bucket
+    return bucket
+
+
+def _perf_signature(*parts: Any) -> str:
+    try:
+        payload = json.dumps(parts, ensure_ascii=False, default=str, sort_keys=True)
+    except Exception:
+        payload = repr(parts)
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+
+def _registry_runtime_signature() -> tuple[Any, Any]:
+    task_df = load_task_registry_df()
+    task_sig = (
+        len(task_df) if isinstance(task_df, pd.DataFrame) else 0,
+        normalize_text(task_df.iloc[0].get("created_at", "")) if isinstance(task_df, pd.DataFrame) and not task_df.empty else "",
+        normalize_text(task_df.iloc[0].get("status", "")) if isinstance(task_df, pd.DataFrame) and not task_df.empty else "",
+    )
+    pipe_df = load_pipeline_registry_df()
+    pipe_sig = (
+        len(pipe_df) if isinstance(pipe_df, pd.DataFrame) else 0,
+        normalize_text(pipe_df.iloc[0].get("updated_at", "")) if isinstance(pipe_df, pd.DataFrame) and not pipe_df.empty else "",
+        normalize_text(pipe_df.iloc[0].get("pipeline_status", "")) if isinstance(pipe_df, pd.DataFrame) and not pipe_df.empty else "",
+    )
+    return task_sig, pipe_sig
+
+
+def _base_runtime_data_signature(include_registry: bool = True) -> tuple[Any, ...]:
+    parts = [
+        st.session_state.get("comparison_version", ""),
+        st.session_state.get("photo_last_sync_sig", ""),
+        st.session_state.get("avito_last_sync_sig", ""),
+        st.session_state.get("hot_items_last_sync_sig", ""),
+        st.session_state.get("purchase_cost_last_sync_sig", ""),
+    ]
+    if include_registry:
+        parts.extend(_registry_runtime_signature())
+    return tuple(parts)
+
+
+def get_cached_hot_watchlist_lookup(hot_df: pd.DataFrame | None, tab_label: str = "") -> dict[str, list[dict[str, Any]]]:
+    if not isinstance(hot_df, pd.DataFrame) or hot_df.empty:
+        return {}
+    sig = _perf_signature(
+        _base_runtime_data_signature(include_registry=False),
+        normalize_text(tab_label),
+        len(hot_df),
+        tuple(hot_df.columns.tolist()),
+    )
+    bucket = _perf_cache_bucket("_perf_hot_lookup_cache")
+    cached = bucket.get(sig)
+    if isinstance(cached, dict):
+        return cached
+    lookup = build_hot_watchlist_lookup(hot_df, tab_label=tab_label)
+    if len(bucket) > 12:
+        bucket.clear()
+    bucket[sig] = lookup
+    return lookup
+
+
+def get_cached_crm_workspace_products_df(
+    sheet_df: pd.DataFrame | None,
+    photo_df: pd.DataFrame | None,
+    avito_df: pd.DataFrame | None,
+    min_qty: float,
+    sheet_name: str,
+    sheet_label: str,
+) -> pd.DataFrame:
+    if not isinstance(sheet_df, pd.DataFrame) or sheet_df.empty:
+        return pd.DataFrame()
+    sig = _perf_signature(
+        _base_runtime_data_signature(include_registry=True),
+        normalize_text(sheet_name),
+        normalize_text(sheet_label),
+        round(float(min_qty or 0.0), 4),
+        len(sheet_df),
+        tuple(sheet_df.columns.tolist()),
+    )
+    bucket = _perf_cache_bucket("_perf_crm_products_cache")
+    cached = bucket.get(sig)
+    if isinstance(cached, pd.DataFrame):
+        out = cached.copy(deep=False)
+        out.attrs["runtime_sig"] = sig
+        return out
+    out = build_crm_workspace_products_df(sheet_df, photo_df, avito_df, min_qty, sheet_name, sheet_label)
+    out.attrs["runtime_sig"] = sig
+    if len(bucket) > 12:
+        bucket.clear()
+    bucket[sig] = out.copy(deep=False)
+    return out
+
+
+def get_cached_procurement_decision_df(products_df: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(products_df, pd.DataFrame) or products_df.empty:
+        return pd.DataFrame()
+    sig = _perf_signature(
+        products_df.attrs.get("runtime_sig", ""),
+        len(products_df),
+        float(st.session_state.get("distributor_threshold", 35.0) or 35.0),
+    )
+    bucket = _perf_cache_bucket("_perf_decision_cache")
+    cached = bucket.get(sig)
+    if isinstance(cached, pd.DataFrame):
+        return cached.copy(deep=False)
+    out = build_procurement_decision_df(products_df)
+    if len(bucket) > 12:
+        bucket.clear()
+    bucket[sig] = out.copy(deep=False)
+    return out
+
+
+def get_cached_operational_analytics_bundle(
+    sheet_df: pd.DataFrame | None,
+    photo_df: pd.DataFrame | None,
+    avito_df: pd.DataFrame | None,
+    min_qty: float,
+    sheet_name: str,
+    hot_items_df: pd.DataFrame | None = None,
+) -> dict[str, Any]:
+    if not isinstance(sheet_df, pd.DataFrame) or sheet_df.empty:
+        return {}
+    sig = _perf_signature(
+        _base_runtime_data_signature(include_registry=True),
+        normalize_text(sheet_name),
+        round(float(min_qty or 0.0), 4),
+        len(sheet_df),
+        tuple(sheet_df.columns.tolist()),
+    )
+    bucket = _perf_cache_bucket("_perf_analytics_bundle_cache")
+    cached = bucket.get(sig)
+    if isinstance(cached, dict):
+        return cached
+    registry_df = load_avito_registry_df()
+    bundle = build_operational_analytics_bundle(sheet_df, photo_df, avito_df, registry_df, min_qty, sheet_name, hot_items_df)
+    if len(bucket) > 8:
+        bucket.clear()
+    bucket[sig] = bundle
+    return bundle
+
+
+def get_cached_hot_buy_watchlist_table() -> pd.DataFrame:
+    hot_df = st.session_state.get("hot_items_df")
+    if not isinstance(hot_df, pd.DataFrame) or hot_df.empty:
+        return pd.DataFrame()
+    threshold_pct = float(st.session_state.get("distributor_threshold", 35.0) or 35.0)
+    min_qty = float(st.session_state.get("distributor_min_qty", 1.0) or 1.0)
+    sig = _perf_signature(_base_runtime_data_signature(include_registry=False), threshold_pct, min_qty)
+    bucket = _perf_cache_bucket("_perf_hot_buy_cache")
+    cached = bucket.get(sig)
+    if isinstance(cached, pd.DataFrame):
+        return cached.copy(deep=False)
+
+    sheets = st.session_state.get("comparison_sheets", {})
+    photo_df = st.session_state.get("photo_df")
+    avito_df = st.session_state.get("avito_df")
+    sheet_specs = [("Сравнение", "Оригинал"), ("Уценка", "Уценка"), ("Совместимые", "Совместимые")]
+    all_parts: list[pd.DataFrame] = []
+    if isinstance(sheets, dict) and sheets:
+        for sheet_name, sheet_label in sheet_specs:
+            sheet_df = sheets.get(sheet_name)
+            if not isinstance(sheet_df, pd.DataFrame) or sheet_df.empty:
+                continue
+            try:
+                products_df = get_cached_crm_workspace_products_df(sheet_df, photo_df, avito_df, min_qty, sheet_name, sheet_label)
+                decision_df = get_cached_procurement_decision_df(products_df)
+                buy_df = filter_procurement_queue(decision_df, "Можно брать")
+                if isinstance(buy_df, pd.DataFrame) and not buy_df.empty:
+                    all_parts.append(buy_df)
+            except Exception:
+                continue
+        if all_parts:
+            out = pd.concat(all_parts, ignore_index=True)
+            if "Разница, %" in out.columns:
+                out = out[pd.to_numeric(out["Разница, %"], errors="coerce").fillna(0.0).ge(float(threshold_pct))].copy()
+            if not out.empty:
+                sort_cols = [c for c in ["Приоритет", "Продажи, шт/мес", "Лист", "Артикул"] if c in out.columns]
+                if sort_cols:
+                    ascending = [False if c in {"Приоритет", "Продажи, шт/мес"} else True for c in sort_cols]
+                    out = out.sort_values(sort_cols, ascending=ascending, kind="stable")
+                out = out.reset_index(drop=True)
+                if len(bucket) > 6:
+                    bucket.clear()
+                bucket[sig] = out.copy(deep=False)
+                return out
+
+    out = pd.DataFrame()
+    if len(bucket) > 6:
+        bucket.clear()
+    bucket[sig] = out.copy(deep=False)
+    return out
 
 
 def log_operation(message: str, level: str = "info") -> None:
@@ -1061,89 +1273,16 @@ def hot_watchlist_summary_text() -> str:
     hot_df = st.session_state.get("hot_items_df")
     if not isinstance(hot_df, pd.DataFrame) or hot_df.empty:
         return "статистика ещё не загружена"
-    buy_count = len(build_hot_buy_watchlist_table())
+    buy_count = len(get_cached_hot_buy_watchlist_table())
     strong_count = int(pd.to_numeric(hot_df.get("sales_per_month", pd.Series(dtype=float)), errors="coerce").fillna(0.0).ge(2.0).sum())
     source_kind = normalize_text(hot_df.get("stats_source_kind", pd.Series(dtype=object)).iloc[0] if "stats_source_kind" in hot_df.columns and not hot_df.empty else "")
     if source_kind == "velocity":
         return f"Строк статистики: {len(hot_df)} • сильный спрос: {strong_count} • можно брать: {buy_count}"
     return f"Ходовых: {len(hot_df)} • сильный спрос: {strong_count} • можно брать: {buy_count}"
 
+
 def build_hot_buy_watchlist_table() -> pd.DataFrame:
-    hot_df = st.session_state.get("hot_items_df")
-    if not isinstance(hot_df, pd.DataFrame) or hot_df.empty:
-        return pd.DataFrame()
-
-    threshold_pct = float(st.session_state.get("distributor_threshold", 35.0) or 35.0)
-    min_qty = float(st.session_state.get("distributor_min_qty", 1.0) or 1.0)
-    sheets = st.session_state.get("comparison_sheets", {})
-    photo_df = st.session_state.get("photo_df")
-    avito_df = st.session_state.get("avito_df")
-
-    sheet_specs = [
-        ("Сравнение", "Оригинал"),
-        ("Уценка", "Уценка"),
-        ("Совместимые", "Совместимые"),
-    ]
-
-    all_parts: list[pd.DataFrame] = []
-    if isinstance(sheets, dict) and sheets:
-        for sheet_name, sheet_label in sheet_specs:
-            sheet_df = sheets.get(sheet_name)
-            if not isinstance(sheet_df, pd.DataFrame) or sheet_df.empty:
-                continue
-            try:
-                products_df = build_crm_workspace_products_df(sheet_df, photo_df, avito_df, min_qty, sheet_name, sheet_label)
-                decision_df = build_procurement_decision_df(products_df)
-                buy_df = filter_procurement_queue(decision_df, "Можно брать")
-                if isinstance(buy_df, pd.DataFrame) and not buy_df.empty:
-                    all_parts.append(buy_df)
-            except Exception:
-                continue
-        if all_parts:
-            out = pd.concat(all_parts, ignore_index=True)
-            if "Разница, %" in out.columns:
-                out = out[pd.to_numeric(out["Разница, %"], errors="coerce").fillna(0.0).ge(float(threshold_pct))].copy()
-            if out.empty:
-                return pd.DataFrame()
-            sort_cols = [c for c in ["Приоритет", "Продажи, шт/мес", "Лист", "Артикул"] if c in out.columns]
-            if sort_cols:
-                ascending = [False if c in {"Приоритет", "Продажи, шт/мес"} else True for c in sort_cols]
-                out = out.sort_values(sort_cols, ascending=ascending, kind="stable")
-            return out.reset_index(drop=True)
-
-    work = hot_df.copy()
-    buy_mask = work.get("buy_signal_30pct", pd.Series(dtype=object)).fillna("").map(normalize_text).str.upper().eq("BUY")
-    work = work.loc[buy_mask].copy()
-    if work.empty:
-        return pd.DataFrame()
-
-    gap_series = pd.to_numeric(work.get("best_supplier_gap_pct", 0.0), errors="coerce").fillna(0.0).map(normalize_gap_percent)
-    work = work[
-        pd.to_numeric(work.get("our_price_now", 0.0), errors="coerce").fillna(0.0).gt(0)
-        & pd.to_numeric(work.get("best_supplier_price_now", 0.0), errors="coerce").fillna(0.0).gt(0)
-        & pd.to_numeric(work.get("best_supplier_stock_now", 0.0), errors="coerce").fillna(0.0).gt(0)
-        & gap_series.ge(float(threshold_pct))
-    ].copy()
-    if work.empty:
-        return pd.DataFrame()
-
-    out = pd.DataFrame({
-        "Лист": work.get("current_sheet", ""),
-        "Артикул": work.get("comparison_article", work.get("watch_article", "")),
-        "Товар": work.get("watch_name", ""),
-        "Ходовой": "Да",
-        "Спрос, шт/мес": work.get("sales_per_month", 0.0),
-        "Наша цена": work.get("our_price_now", 0.0),
-        "Наш остаток": work.get("our_stock_now", 0.0),
-        "Лучший поставщик": work.get("best_supplier", ""),
-        "Цена поставщика": work.get("best_supplier_price_now", 0.0),
-        "Остаток поставщика": work.get("best_supplier_stock_now", 0.0),
-        "Разница, %": gap_series.map(lambda x: round(float(x), 1)),
-        "Дней запаса": work.get("days_of_cover", 0.0),
-        "Приоритет": work.get("priority_score", 0.0),
-        "Действие": [translate_watch_action(x, threshold_pct=threshold_pct) for x in work.get("action_today", "")],
-    })
-    return out.reset_index(drop=True)
+    return get_cached_hot_buy_watchlist_table()
 
 
 def render_hot_buy_watchlist_lazy_panel() -> None:
@@ -3330,6 +3469,7 @@ def clear_task_registry_cache() -> None:
         load_task_registry_df.clear()
     except Exception:
         pass
+    clear_runtime_perf_caches()
 
 
 def create_review_task(
@@ -6113,7 +6253,7 @@ with st.sidebar:
     hot_df_state = st.session_state.get("hot_items_df")
     hot_buy_total = 0
     if isinstance(hot_df_state, pd.DataFrame) and not hot_df_state.empty:
-        hot_buy_total = len(build_hot_buy_watchlist_table())
+        hot_buy_total = len(get_cached_hot_buy_watchlist_table())
     st.checkbox(
         f"Показать таблицу «можно брать» ({hot_buy_total})",
         key="show_hot_buy_watchlist_table",
@@ -6525,7 +6665,7 @@ def build_operational_analytics_bundle(
         return {}
     merged_avito = combine_avito_sources(avito_df, avito_registry_df)
     _, avito_index = build_avito_code_index(merged_avito)
-    hot_lookup = build_hot_watchlist_lookup(hot_items_df, tab_label=sheet_name)
+    hot_lookup = get_cached_hot_watchlist_lookup(hot_items_df, tab_label=sheet_name)
 
     rows_meta: list[dict[str, Any]] = []
     source_counter: Counter[str] = Counter()
@@ -7404,6 +7544,7 @@ def clear_pipeline_registry_cache() -> None:
         load_pipeline_registry_df.clear()
     except Exception:
         pass
+    clear_runtime_perf_caches()
 
 
 def upsert_pipeline_registry(
@@ -7527,7 +7668,7 @@ def build_crm_workspace_products_df(
     registry_df = load_avito_registry_df()
     merged_avito = combine_avito_sources(avito_df, registry_df)
     _, avito_index = build_avito_code_index(merged_avito)
-    hot_lookup = build_hot_watchlist_lookup(st.session_state.get("hot_items_df"), tab_label=sheet_label)
+    hot_lookup = get_cached_hot_watchlist_lookup(st.session_state.get("hot_items_df"), tab_label=sheet_label)
 
     task_df = load_task_registry_df()
     task_lookup: dict[tuple[str, str], int] = {}
@@ -7992,8 +8133,8 @@ def _crm_pick_label_to_row(products_df: pd.DataFrame) -> tuple[list[str], dict[s
     return labels, mapping
 
 
-def render_crm_workspace_dashboard(products_df: pd.DataFrame, tasks_df: pd.DataFrame) -> None:
-    decision_df = build_procurement_decision_df(products_df)
+def render_crm_workspace_dashboard(products_df: pd.DataFrame, tasks_df: pd.DataFrame, decision_df: pd.DataFrame | None = None) -> None:
+    decision_df = decision_df if isinstance(decision_df, pd.DataFrame) else get_cached_procurement_decision_df(products_df)
     task_counts = task_summary_counts()
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Открытые задачи", task_counts.get("open", 0))
@@ -8030,8 +8171,8 @@ def render_crm_workspace_dashboard(products_df: pd.DataFrame, tasks_df: pd.DataF
         st.dataframe(tasks_df.head(10), use_container_width=True, hide_index=True, height=320)
 
 
-def render_crm_workspace_queues(products_df: pd.DataFrame) -> None:
-    decision_df = build_procurement_decision_df(products_df)
+def render_crm_workspace_queues(products_df: pd.DataFrame, decision_df: pd.DataFrame | None = None) -> None:
+    decision_df = decision_df if isinstance(decision_df, pd.DataFrame) else get_cached_procurement_decision_df(products_df)
     queue_names = ["Все", "Можно брать", "К пополнению", "Требует цены", "Без фото", "Без Avito", "Готово к размещению", "Залежалый остаток", "Сильный спрос", "Ходовые", "Под наблюдением"]
     queue_name = st.selectbox("Очередь", queue_names, key="crm_queue_filter")
     queue_df = filter_procurement_queue(decision_df, queue_name)
@@ -8070,8 +8211,8 @@ def render_crm_workspace_queues(products_df: pd.DataFrame) -> None:
         st.rerun()
 
 
-def render_crm_workspace_execution(products_df: pd.DataFrame) -> None:
-    decision_df = build_procurement_decision_df(products_df)
+def render_crm_workspace_execution(products_df: pd.DataFrame, decision_df: pd.DataFrame | None = None) -> None:
+    decision_df = decision_df if isinstance(decision_df, pd.DataFrame) else get_cached_procurement_decision_df(products_df)
     queue_names = ["Можно брать", "К пополнению", "Требует цены", "Без фото", "Без Avito", "Готово к размещению", "Залежалый остаток", "Сильный спрос", "Ходовые", "Под наблюдением"]
     queue_name = st.selectbox("Execution очередь", queue_names, key="crm_execution_queue_name")
     queue_df = filter_procurement_queue(decision_df, queue_name)
@@ -8130,8 +8271,8 @@ def render_crm_workspace_execution(products_df: pd.DataFrame) -> None:
             open_product_in_catalog(normalize_text(row.get("Артикул", "")), normalize_text(row.get("Лист", "Оригинал")))
 
 
-def render_crm_workspace_pipeline(products_df: pd.DataFrame) -> None:
-    decision_df = build_procurement_decision_df(products_df)
+def render_crm_workspace_pipeline(products_df: pd.DataFrame, decision_df: pd.DataFrame | None = None) -> None:
+    decision_df = decision_df if isinstance(decision_df, pd.DataFrame) else get_cached_procurement_decision_df(products_df)
     if decision_df.empty:
         st.info("Нет данных для pipeline.")
         return
@@ -8172,13 +8313,11 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         st.info("Нет данных для CRM-карточки.")
         return
     selected_article_norm = normalize_text(st.session_state.get("crm_workspace_article_norm", ""))
+    labels, mapping = _crm_pick_label_to_row(products_df)
     if selected_article_norm and selected_article_norm in set(products_df["article_norm"].astype(str)):
-        current_row = products_df[products_df["article_norm"].astype(str) == selected_article_norm].iloc[0].to_dict()
-        labels, mapping = _crm_pick_label_to_row(products_df)
-        default_label = next((label for label, row in mapping.items() if normalize_text(row.get("article_norm", "")) == selected_article_norm), labels[0])
+        default_label = next((label for label, rec in mapping.items() if normalize_text(rec.get("article_norm", "")) == selected_article_norm), labels[0])
         pick = st.selectbox("Позиция для CRM-карточки", labels, index=labels.index(default_label), key="crm_card_pick")
     else:
-        labels, mapping = _crm_pick_label_to_row(products_df)
         pick = st.selectbox("Позиция для CRM-карточки", labels, key="crm_card_pick")
     row = mapping[pick]
     remember_crm_article(normalize_text(row.get("article_norm", "")))
@@ -8205,10 +8344,17 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         st.write(f"**Склад:** {normalize_text(row.get('stock_action', '')) or 'Проверить вручную'}")
         st.write(f"**Цена:** {normalize_text(row.get('price_action', '')) or 'Оставить цену'}")
         st.write(f"**Размещение:** {normalize_text(row.get('placement_action', '')) or 'Ничего'}")
-        st.write(f"**Рынок:** {('ниже нас на ' + str(round(safe_float(row.get('market_gap_pct', 0.0), 0.0), 1)) + '%') if safe_float(row.get('market_gap_pct', 0.0), 0.0) > 0 else 'нет сигнала рынка'}")
+        st.write(f"**Рынок:** {( 'ниже нас на ' + str(round(safe_float(row.get('market_gap_pct', 0.0), 0.0), 1)) + '%' ) if safe_float(row.get('market_gap_pct', 0.0), 0.0) > 0 else 'нет сигнала рынка'}")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Обзор", "Характеристики", "Поставщики", "Статистика", "Задачи"])
-    with tab1:
+    card_section = st.radio(
+        "Раздел карточки",
+        ["Обзор", "Характеристики", "Поставщики", "Статистика", "Задачи"],
+        key="crm_card_section",
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+
+    if card_section == "Обзор":
         left, right = st.columns(2)
         left.write(f"**Лист:** {normalize_text(row.get('sheet_label', '')) or sheet_label}")
         left.write(f"**Фото:** {'Да' if bool(row.get('has_photo')) else 'Нет'}")
@@ -8271,52 +8417,34 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
 
         with st.expander("Фото и заметка по карточке", expanded=photo_editor_expanded):
             with st.form(f"crm_workspace_card_override_{art_norm}"):
-                photo_url_new = st.text_input(
-                    "Фото (ссылка)",
-                    value=current_photo_url,
-                    key=f"crm_workspace_card_photo_{art_norm}",
-                    placeholder="Вставь прямую ссылку на фото товара",
-                )
-                note_new = st.text_area(
-                    "Заметка",
-                    value=current_note,
-                    height=90,
-                    key=f"crm_workspace_card_note_{art_norm}",
-                    placeholder="Короткий комментарий по товару: что исправили, что проверить, что важно.",
-                )
+                photo_url_new = st.text_input("Фото (ссылка)", value=current_photo_url, key=f"crm_workspace_card_photo_{art_norm}", placeholder="Вставь прямую ссылку на фото товара")
+                note_new = st.text_area("Заметка", value=current_note, height=90, key=f"crm_workspace_card_note_{art_norm}", placeholder="Короткий комментарий по товару: что исправили, что проверить, что важно.")
                 s1, s2 = st.columns(2)
                 save_clicked = s1.form_submit_button("Сохранить карточку", use_container_width=True, type="primary")
                 reset_clicked = s2.form_submit_button("Сбросить ручные правки", use_container_width=True)
-
             if save_clicked:
-                save_card_override(
-                    sheet_name,
-                    art,
-                    art_norm,
-                    {
-                        "photo_url": photo_url_new,
-                        "name_override": normalize_text(row.get("name", "")),
-                        "meta_brand": normalize_text(row.get("meta_brand", "")),
-                        "meta_model": normalize_text(row.get("meta_model", "")),
-                        "meta_manufacturer_code": normalize_text(row.get("meta_manufacturer_code", "")),
-                        "meta_print_type": normalize_text(row.get("meta_print_type", "")),
-                        "meta_color": normalize_text(row.get("meta_color", "")),
-                        "meta_capacity": normalize_text(row.get("meta_capacity", "")),
-                        "meta_iso_pages": normalize_text(row.get("meta_iso_pages", "")),
-                        "meta_item_type": normalize_text(row.get("meta_item_type", "")),
-                        "meta_print_technology": normalize_text(row.get("meta_print_technology", "")),
-                        "meta_description": normalize_text(row.get("meta_description", "")),
-                        "meta_fits_models": normalize_text(row.get("meta_fits_models", "")),
-                        "meta_weight": normalize_text(row.get("meta_weight", "")),
-                        "meta_length": normalize_text(row.get("meta_length", "")),
-                        "meta_width": normalize_text(row.get("meta_width", "")),
-                        "meta_height": normalize_text(row.get("meta_height", "")),
-                        "note": note_new,
-                    },
-                )
+                upsert_card_override(sheet_name, art, art_norm, {
+                    "photo_url": photo_url_new,
+                    "meta_source_sheet": normalize_text(row.get("meta_source_sheet", "")),
+                    "meta_brand": normalize_text(row.get("meta_brand", "")),
+                    "meta_model": normalize_text(row.get("meta_model", "")),
+                    "meta_manufacturer_code": normalize_text(row.get("meta_manufacturer_code", "")),
+                    "meta_print_type": normalize_text(row.get("meta_print_type", "")),
+                    "meta_color": normalize_text(row.get("meta_color", "")),
+                    "meta_capacity": normalize_text(row.get("meta_capacity", "")),
+                    "meta_iso_pages": normalize_text(row.get("meta_iso_pages", "")),
+                    "meta_item_type": normalize_text(row.get("meta_item_type", "")),
+                    "meta_print_technology": normalize_text(row.get("meta_print_technology", "")),
+                    "meta_description": normalize_text(row.get("meta_description", "")),
+                    "meta_fits_models": normalize_text(row.get("meta_fits_models", "")),
+                    "meta_weight": normalize_text(row.get("meta_weight", "")),
+                    "meta_length": normalize_text(row.get("meta_length", "")),
+                    "meta_width": normalize_text(row.get("meta_width", "")),
+                    "meta_height": normalize_text(row.get("meta_height", "")),
+                    "note": note_new,
+                })
                 st.success(f"Карточка {art} сохранена.")
                 st.rerun()
-
             if reset_clicked:
                 delete_card_override(sheet_name, art_norm)
                 st.success(f"Ручные правки для {art} сброшены.")
@@ -8324,7 +8452,8 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
 
         if st.button("Открыть в каталоге", use_container_width=True, key="crm_card_open_catalog"):
             open_product_in_catalog(normalize_text(row.get("article", "")), normalize_text(row.get("sheet_label", sheet_label)))
-    with tab2:
+
+    elif card_section == "Характеристики":
         ch1, ch2 = st.columns(2)
         ch1.write(f"**Бренд:** {normalize_text(row.get('meta_brand', '')) or '—'}")
         ch1.write(f"**Модель:** {normalize_text(row.get('meta_model', '')) or '—'}")
@@ -8340,20 +8469,17 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         st.write(f"**Подходит к моделям:** {normalize_text(row.get('meta_fits_models', '')) or '—'}")
         st.write(f"**Описание:** {normalize_text(row.get('meta_description', '')) or '—'}")
         st.write(f"**Источник закупки:** {normalize_text(row.get('purchase_source_sheet', '')) or '—'}")
-    with tab3:
+
+    elif card_section == "Поставщики":
         valid_offers = row.get("supplier_valid_offers", []) if isinstance(row.get("supplier_valid_offers", []), list) else []
         debug_rows = row.get("supplier_debug_rows", []) if isinstance(row.get("supplier_debug_rows", []), list) else []
-
         if valid_offers:
-            offers_df = pd.DataFrame([
-                {
-                    "Поставщик": normalize_text(x.get("source", "")),
-                    "Цена": safe_float(x.get("price"), 0.0),
-                    "Остаток": safe_float(x.get("qty"), 0.0),
-                    "Статус": normalize_text(x.get("status", "")) or "OK",
-                }
-                for x in valid_offers
-            ])
+            offers_df = pd.DataFrame([{
+                "Поставщик": normalize_text(x.get("source", "")),
+                "Цена": safe_float(x.get("price"), 0.0),
+                "Остаток": safe_float(x.get("qty"), 0.0),
+                "Статус": normalize_text(x.get("status", "")) or "OK",
+            } for x in valid_offers])
             cheaper_offers_df = offers_df[offers_df["Цена"].fillna(0).astype(float) < safe_float(row.get("sale_price"), 0.0)].copy()
             if not cheaper_offers_df.empty:
                 st.success(f"Найдено предложений поставщиков дешевле нашей цены: {len(cheaper_offers_df)}")
@@ -8364,11 +8490,11 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
                     st.dataframe(offers_df, use_container_width=True, hide_index=True, height=min(260, 80 + len(offers_df) * 35))
         else:
             st.info("По этой позиции нет валидных предложений поставщиков.")
-
         if debug_rows:
             with st.expander("Диагностика офферов", expanded=not bool(valid_offers)):
                 st.dataframe(pd.DataFrame(debug_rows), use_container_width=True, hide_index=True, height=320)
-    with tab4:
+
+    elif card_section == "Статистика":
         stats_source_kind = normalize_text(row.get("stats_source_kind", ""))
         has_stats = bool(
             safe_float(row.get("sales_per_month"), 0.0) > 0
@@ -8406,7 +8532,7 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
             st.write(f"**Скорость:** {normalize_text(row.get('velocity_band', '')) or '—'}")
             st.write(f"**ABC:** {normalize_text(row.get('abc_class', '')) or '—'}")
 
-    with tab5:
+    else:
         task_df = build_task_view_df(sheet_filter=sheet_name)
         if isinstance(task_df, pd.DataFrame) and not task_df.empty:
             task_df = task_df[task_df["Артикул"].fillna("").astype(str).eq(normalize_text(row.get("article", "")))].copy()
@@ -8418,23 +8544,15 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
             note = st.text_area("Комментарий", value=normalize_text(row.get("decision_reason", "")), height=70, key=f"crm_card_quick_note_{normalize_text(row.get('article_norm', ''))}")
             submitted = st.form_submit_button("Создать задачу", use_container_width=True)
         if submitted:
-            create_review_task(
-                article=normalize_text(row.get("article", "")),
-                article_norm=normalize_text(row.get("article_norm", "")),
-                sheet_name=sheet_name,
-                name_snapshot=normalize_text(row.get("name", "")),
-                due_date=due_date,
-                reason=reason,
-                note=note,
-                source="crm_workspace_card",
-            )
+            create_review_task(article=normalize_text(row.get("article", "")), article_norm=normalize_text(row.get("article_norm", "")), sheet_name=sheet_name, name_snapshot=normalize_text(row.get("name", "")), due_date=due_date, reason=reason, note=note, source="crm_workspace_card")
             st.success("Задача создана.")
             st.rerun()
 
 
 def render_crm_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataFrame | None, avito_df: pd.DataFrame | None, sheet_name: str, sheet_label: str, min_qty: float) -> None:
-    products_df = build_crm_workspace_products_df(sheet_df, photo_df, avito_df, min_qty, sheet_name, sheet_label)
+    products_df = get_cached_crm_workspace_products_df(sheet_df, photo_df, avito_df, min_qty, sheet_name, sheet_label)
     tasks_df = build_task_view_df(sheet_filter=sheet_name)
+    decision_df = get_cached_procurement_decision_df(products_df)
     st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
     render_block_header(
         f"CRM workspace — {sheet_label}",
@@ -8446,33 +8564,31 @@ def render_crm_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataFrame |
         st.info("По активному листу пока нет данных для CRM workspace.")
         st.markdown('</div>', unsafe_allow_html=True)
         return
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Дашборд", "Очереди", "Исполнение", "Pipeline", "Карточка"])
-    with tab1:
-        render_crm_workspace_dashboard(products_df, tasks_df)
-    with tab2:
-        render_crm_workspace_queues(products_df)
-    with tab3:
-        render_crm_workspace_execution(products_df)
-    with tab4:
-        render_crm_workspace_pipeline(products_df)
-    with tab5:
+
+    section = st.radio(
+        "Раздел CRM",
+        ["Дашборд", "Очереди", "Исполнение", "Pipeline", "Карточка"],
+        key="crm_workspace_section",
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    if section == "Дашборд":
+        render_crm_workspace_dashboard(products_df, tasks_df, decision_df=decision_df)
+    elif section == "Очереди":
+        render_crm_workspace_queues(products_df, decision_df=decision_df)
+    elif section == "Исполнение":
+        render_crm_workspace_execution(products_df, decision_df=decision_df)
+    elif section == "Pipeline":
+        render_crm_workspace_pipeline(products_df, decision_df=decision_df)
+    else:
         render_crm_workspace_card(products_df, sheet_name, sheet_label)
     st.markdown('</div>', unsafe_allow_html=True)
 
 
 def render_analytics_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataFrame | None, avito_df: pd.DataFrame | None, sheet_name: str, sheet_label: str, min_qty: float) -> None:
-    products_df = build_crm_workspace_products_df(sheet_df, photo_df, avito_df, min_qty, sheet_name, sheet_label)
-    registry_df = load_avito_registry_df()
-    bundle = build_operational_analytics_bundle(
-        sheet_df,
-        photo_df,
-        avito_df,
-        registry_df,
-        min_qty,
-        sheet_label,
-        st.session_state.get("hot_items_df"),
-    ) if isinstance(sheet_df, pd.DataFrame) and not sheet_df.empty else {}
-    decision_df = build_procurement_decision_df(products_df)
+    products_df = get_cached_crm_workspace_products_df(sheet_df, photo_df, avito_df, min_qty, sheet_name, sheet_label)
+    bundle = get_cached_operational_analytics_bundle(sheet_df, photo_df, avito_df, min_qty, sheet_label, st.session_state.get("hot_items_df")) if isinstance(sheet_df, pd.DataFrame) and not sheet_df.empty else {}
+    decision_df = get_cached_procurement_decision_df(products_df)
     st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
     render_block_header(
         f"Аналитика — {sheet_label}",
@@ -8516,9 +8632,15 @@ def render_analytics_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataF
         tone="green",
     )
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Сегодня", "Цена и рынок", "Склад и спрос", "Качество", "Аккаунты / серии"])
+    analytics_section = st.radio(
+        "Раздел аналитики",
+        ["Сегодня", "Цена и рынок", "Склад и спрос", "Качество", "Аккаунты / серии"],
+        key="analytics_workspace_section",
+        horizontal=True,
+        label_visibility="collapsed",
+    )
 
-    with tab1:
+    if analytics_section == "Сегодня":
         if isinstance(tasks_df, pd.DataFrame) and not tasks_df.empty:
             st.markdown("#### Что делать сегодня")
             st.dataframe(tasks_df, use_container_width=True, hide_index=True)
