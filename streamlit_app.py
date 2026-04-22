@@ -8915,6 +8915,24 @@ def build_search_procurement_summary_df(
     return out.reset_index(drop=True)
 
 
+def get_procurement_summary_display_columns(df: pd.DataFrame, compact: bool = True) -> list[str]:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return []
+    compact_cols = [
+        "Артикул", "Товар", "Наш остаток", "Наша цена", "Средняя закупка",
+        "Продажи, шт/мес", "Запас, мес", "Лучший поставщик", "Цена поставщика",
+        "Рынок vs наша цена", "Сигнал закупки", "Сигнал цены", "Решение",
+    ]
+    full_cols = [
+        "Артикул", "Товар", "Наш остаток", "Наша цена", "Средняя закупка", "Наценка, ₽", "Наценка, %",
+        "Продажи, шт/мес", "Запас, мес", "Статус склада", "Лучший поставщик", "Цена поставщика",
+        "Разница, %", "Рынок vs наша цена", "Сигнал закупки", "Сигнал цены", "Рекомендованная цена",
+        "Фото", "Avito", "Решение", "Почему", "Открытых задач", "Pipeline", "Очередь",
+    ]
+    source = compact_cols if compact else full_cols
+    return [c for c in source if c in df.columns]
+
+
 def render_search_procurement_summary_block(
     result_df: pd.DataFrame | None,
     photo_df: pd.DataFrame | None,
@@ -8928,32 +8946,48 @@ def render_search_procurement_summary_block(
     if not isinstance(summary_df, pd.DataFrame) or summary_df.empty:
         return
 
+    compact_key = f"proc_summary_compact_{tab_key}"
+    if compact_key not in st.session_state:
+        st.session_state[compact_key] = True
+
     st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
     render_block_header(
         f"{sheet_label} — закупочная сводка по найденным позициям",
-        "Одна главная таблица для быстрого решения по товару: остаток, цена, закупка, продажи, запас, рынок и итоговое действие.",
+        "Главная таблица под поиском: всё важное по закупке в одном месте, без переходов по CRM и вторичным панелям.",
         icon="📌",
-        help_text="Это быстрый слой для закупщика под поиском. Идея — не ходить по CRM и вкладкам ради базового решения по позиции.",
+        help_text="По умолчанию показывается компактная версия для быстрого решения. Полный набор колонок и сырой поиск скрыты ниже, чтобы главная страница не была перегружена.",
     )
-    st.caption("ⓘ Здесь собрана вся ключевая информация по найденным товарам в одном месте: склад, экономика, спрос, рынок и итоговое решение.")
 
-    m1, m2, m3, m4, m5 = st.columns(5)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Позиций", len(summary_df))
     m2.metric("Вход 35%+", int(summary_df.get("Сигнал закупки", pd.Series(dtype=object)).fillna("").astype(str).eq("Да").sum()))
     m3.metric("Можно поднять цену", int(summary_df.get("Сигнал цены", pd.Series(dtype=object)).fillna("").astype(str).eq("Поднять").sum()))
-    m4.metric("Залежалый / не покупать", int(summary_df.get("Решение", pd.Series(dtype=object)).fillna("").astype(str).isin(["Не покупать", "Распродавать"]).sum()))
-    m5.metric("Требуют цены", int(summary_df.get("Решение", pd.Series(dtype=object)).fillna("").astype(str).isin(["Пересмотреть цену"]).sum()))
+    m4.metric("Риск / не покупать", int(summary_df.get("Решение", pd.Series(dtype=object)).fillna("").astype(str).isin(["Не покупать", "Распродавать", "Держать остаток"]).sum()))
 
-    view_df = summary_df.copy()
-    st.dataframe(view_df, use_container_width=True, hide_index=True, height=min(560, 140 + len(view_df) * 35))
-    st.download_button(
-        "⬇️ Скачать закупочную сводку",
-        report_to_excel_bytes(view_df),
+    c1, c2, c3 = st.columns([1.1, 1.25, 2.5])
+    compact_mode = c1.checkbox(
+        "Компактный вид",
+        key=compact_key,
+        help="Оставляет на главной только ключевые колонки. Полная версия таблицы открывается ниже по expander.",
+    )
+    c2.download_button(
+        "⬇️ Скачать сводку",
+        report_to_excel_bytes(summary_df),
         file_name=f"procurement_summary_{tab_key}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
         key=f"download_procurement_summary_{tab_key}",
     )
+    c3.caption("Для шефа и закупщика эта сводка — основной экран. Всё вторичное мы прячем, чтобы не шуметь на главной.")
+
+    display_cols = get_procurement_summary_display_columns(summary_df, compact=compact_mode)
+    view_df = summary_df[display_cols].copy() if display_cols else summary_df.copy()
+    st.dataframe(view_df, use_container_width=True, hide_index=True, height=min(520, 140 + len(view_df) * 35))
+
+    with st.expander("Полная сводка и все колонки", expanded=False):
+        full_cols = get_procurement_summary_display_columns(summary_df, compact=False)
+        full_df = summary_df[full_cols].copy() if full_cols else summary_df.copy()
+        st.dataframe(full_df, use_container_width=True, hide_index=True, height=min(640, 160 + len(full_df) * 35))
     st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -9170,8 +9204,6 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
             st.warning("Ничего не найдено. Попробуйте другой артикул или часть названия.")
         else:
             compare_map = build_distributor_compare(result_df, min_qty=min_dist_qty)
-            render_results_insight_dashboard(display_result_df, compare_map, source_pairs)
-            render_results_table(display_result_df.head(200), price_mode, round100, custom_discount, distributor_map=compare_map, show_photos=show_photos)
             render_search_procurement_summary_block(
                 display_result_df,
                 photo_df,
@@ -9181,67 +9213,46 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
                 tab_label,
                 tab_key,
             )
-            st.download_button(
-                "⬇️ Скачать результаты в Excel",
-                to_excel_bytes(display_result_df, price_mode, round100, custom_discount, min_dist_qty),
-                file_name=f"moy_tovar_search_results_{tab_key}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                key=f"download_results_{tab_key}",
-            )
-            with st.expander("Показать техническую таблицу"):
-                tech = display_result_df.copy()
-                tech["Наша цена"] = tech["sale_price"].map(fmt_price)
-                tech["Наш склад"] = tech["free_qty"].map(fmt_qty)
-                tech["Лучшая цена"] = tech.apply(lambda row: (get_best_offer_if_cheaper(row, min_qty=min_dist_qty) or {}).get("price_fmt", ""), axis=1)
-                tech["Лучший поставщик"] = tech.apply(lambda row: (get_best_offer_if_cheaper(row, min_qty=min_dist_qty) or {}).get("source", ""), axis=1)
-                tech["Фото"] = tech.get("photo_url", "")
-                if "hot_flag" in tech.columns:
-                    tech["Ходовая"] = tech["hot_flag"].map(lambda x: "Да" if bool(x) else "")
-                    tech["Action"] = tech.get("hot_action_today", "")
-                    tech = tech[["article", "name", "Наша цена", "Наш склад", "Лучший поставщик", "Лучшая цена", "Ходовая", "Action", "Фото"]].rename(columns={"article": "Артикул", "name": "Название"})
-                else:
-                    tech = tech[["article", "name", "Наша цена", "Наш склад", "Лучший поставщик", "Лучшая цена", "Фото"]].rename(columns={"article": "Артикул", "name": "Название"})
-                st.dataframe(tech, use_container_width=True, hide_index=True)
 
-            # CRM-карточка и редактор убраны из каталожного поиска.
-            # Теперь этот блок открывается только внутри CRM workspace,
-            # чтобы не дублироваться и не замедлять обычный поиск.
+            with st.expander("Быстрый просмотр найденных строк", expanded=False):
+                render_results_insight_dashboard(display_result_df, compare_map, source_pairs)
+                render_results_table(display_result_df.head(200), price_mode, round100, custom_discount, distributor_map=compare_map, show_photos=show_photos)
+                st.download_button(
+                    "⬇️ Скачать результаты в Excel",
+                    to_excel_bytes(display_result_df, price_mode, round100, custom_discount, min_dist_qty),
+                    file_name=f"moy_tovar_search_results_{tab_key}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key=f"download_results_{tab_key}",
+                )
+                with st.expander("Показать техническую таблицу"):
+                    tech = display_result_df.copy()
+                    tech["Наша цена"] = tech["sale_price"].map(fmt_price)
+                    tech["Наш склад"] = tech["free_qty"].map(fmt_qty)
+                    tech["Лучшая цена"] = tech.apply(lambda row: (get_best_offer_if_cheaper(row, min_qty=min_dist_qty) or {}).get("price_fmt", ""), axis=1)
+                    tech["Лучший поставщик"] = tech.apply(lambda row: (get_best_offer_if_cheaper(row, min_qty=min_dist_qty) or {}).get("source", ""), axis=1)
+                    tech["Фото"] = tech.get("photo_url", "")
+                    if "hot_flag" in tech.columns:
+                        tech["Ходовая"] = tech["hot_flag"].map(lambda x: "Да" if bool(x) else "")
+                        tech["Action"] = tech.get("hot_action_today", "")
+                        tech = tech[["article", "name", "Наша цена", "Наш склад", "Лучший поставщик", "Лучшая цена", "Ходовая", "Action", "Фото"]].rename(columns={"article": "Артикул", "name": "Название"})
+                    else:
+                        tech = tech[["article", "name", "Наша цена", "Наш склад", "Лучший поставщик", "Лучшая цена", "Фото"]].rename(columns={"article": "Артикул", "name": "Название"})
+                    st.dataframe(tech, use_container_width=True, hide_index=True)
 
-            lazy_c0, lazy_c1, lazy_c2, lazy_c3, lazy_c4, lazy_c5 = st.columns(6)
-            lazy_c0.checkbox(
-                "Показать шаблоны",
-                key=f"lazy_templates_{tab_key}",
-                help="Готовые текстовые шаблоны по найденным позициям: для ответа клиенту, публикации или быстрой отправки.",
+            helper_key = f"catalog_helper_mode_{tab_key}"
+            if helper_key not in st.session_state:
+                st.session_state[helper_key] = "Ничего"
+            selected_helper_mode = st.radio(
+                "Дополнительный блок",
+                options=["Ничего", "Шаблоны", "Цены у всех", "Файл для руководителя", "Avito", "Аналитика / задачи", "Отчёт по листу"],
+                key=helper_key,
+                horizontal=True,
+                help="Главная страница остаётся компактной: сверху сводка, ниже по выбору только один вспомогательный блок.",
             )
-            lazy_c1.checkbox(
-                "Показать цены у всех",
-                key=f"lazy_all_prices_{tab_key}",
-                help="Полное сравнение по каждому найденному товару: наша цена и все поставщики с остатками и разницей.",
-            )
-            lazy_c2.checkbox(
-                "Файл для руководителя",
-                key=f"lazy_analysis_{tab_key}",
-                help="Собирает Excel для согласования: артикулы, текущая цена, лучшая цена поставщика и поля для решения по пересмотру.",
-            )
-            lazy_c3.checkbox(
-                "Показать Авито",
-                key=f"lazy_avito_{tab_key}",
-                help="Проверяет, есть ли объявления Авито по найденным артикулам в загруженном файле.",
-            )
-            lazy_c4.checkbox(
-                "Считать отчёт по листу",
-                key=f"lazy_report_{tab_key}",
-                help="Строит управленческий отчёт по всему текущему листу, а не только по найденным строкам.",
-            )
-            lazy_c5.checkbox(
-                "Аналитика / задачи",
-                key=f"lazy_analytics_{tab_key}",
-                help="Открывает операционную аналитику: что пересмотреть, где нет фото/Avito, какие серии и правки требуют внимания.",
-            )
-            st.caption("ⓘ Что за что отвечает: шаблоны — тексты, цены у всех — полная рыночная картина, файл для руководителя — выгрузка на согласование, Авито — наличие объявлений, отчёт по листу — управленческий отчёт, аналитика / задачи — проблемные зоны и действия.")
+            st.caption("Главный сценарий теперь такой: поиск → закупочная сводка. Всё вторичное открывается по одному, чтобы не перегружать экран.")
 
-            if st.session_state.get(f"lazy_templates_{tab_key}", False):
+            if selected_helper_mode == "Шаблоны":
                 result_enriched_for_templates = apply_photo_map(result_df, photo_df) if isinstance(result_df, pd.DataFrame) else result_df
                 if isinstance(result_enriched_for_templates, pd.DataFrame):
                     result_enriched_for_templates = apply_card_overrides(result_enriched_for_templates, sheet_name)
@@ -9262,7 +9273,7 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
                     st.text_area("Шаблон 2", height=300, key=f"template2_{tab_key}")
                 st.markdown('</div>', unsafe_allow_html=True)
 
-            if st.session_state.get(f"lazy_all_prices_{tab_key}", False):
+            if selected_helper_mode == "Цены у всех":
                 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
                 render_block_header(
                     f"{tab_label} — показать цены у всех",
@@ -9279,7 +9290,7 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
                 render_all_prices_block(result_df, min_dist_qty, price_mode, round100, custom_discount, widget_key_prefix=tab_key)
                 st.markdown('</div>', unsafe_allow_html=True)
 
-            if st.session_state.get(f"lazy_analysis_{tab_key}", False):
+            if selected_helper_mode == "Файл для руководителя":
                 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
                 render_info_banner(
                     "Файл для согласования с руководителем",
@@ -9298,7 +9309,7 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
                 )
                 st.markdown('</div>', unsafe_allow_html=True)
 
-            if st.session_state.get(f"lazy_avito_{tab_key}", False) and isinstance(st.session_state.get("avito_df"), pd.DataFrame) and not st.session_state.avito_df.empty:
+            if selected_helper_mode == "Avito" and isinstance(st.session_state.get("avito_df"), pd.DataFrame) and not st.session_state.avito_df.empty:
                 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
                 render_block_header(
                     f"{tab_label} — Авито",
@@ -9308,13 +9319,13 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
                 render_avito_block(st.session_state.avito_df, result_df)
                 st.markdown('</div>', unsafe_allow_html=True)
 
-            if st.session_state.get(f"lazy_analytics_{tab_key}", False):
+            if selected_helper_mode == "Аналитика / задачи":
                 st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
                 render_block_header(
                     f"{tab_label} — аналитика / задачи",
                     "Операционная аналитика по текущему листу: приоритет на пересмотр цены, проблемные позиции, качество карточек, серии, история правок и действия на сегодня.",
                     icon="📌",
-                    help_text="Блок считается лениво и открывается только по чекбоксу. Аналитика строится по текущему листу и не должна влиять на обычный поиск, пока выключена.",
+                    help_text="Блок считается лениво и открывается только когда ты его выбрал. Главный экран поиска от этого не перегружается.",
                 )
                 render_operational_analytics_block(
                     base_sheet_df,
@@ -9325,10 +9336,9 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
                     tab_key,
                 )
                 st.markdown('</div>', unsafe_allow_html=True)
-
         st.markdown('</div>', unsafe_allow_html=True)
 
-    if st.session_state.get(f"lazy_report_{tab_key}", False):
+    if selected_helper_mode == "Отчёт по листу":
         st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
         render_block_header(
             f"{tab_label} — отчёт по листу",
