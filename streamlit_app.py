@@ -743,6 +743,7 @@ def load_persisted_comparison_source_into_state() -> bool:
         return False
 
 
+
 def normalize_watchlist_sheet_name(value: Any) -> str:
     txt = contains_text(value)
     if "ОРИГИН" in txt or "СРАВН" in txt:
@@ -775,16 +776,9 @@ def load_hot_watchlist_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
 
     def _read_excel_bytes(raw_bytes: bytes, ext: str) -> pd.DataFrame:
         bio = io.BytesIO(raw_bytes)
-
-        # xlsx/xlsm — читаем через openpyxl, чтобы не зависеть от auto-detect pandas
         if ext in {".xlsx", ".xlsm"} or raw_bytes[:2] == b"PK":
             bio.seek(0)
             return pd.read_excel(bio, engine="openpyxl")
-
-        # старый .xls на Streamlit Cloud без xlrd не читается.
-        # Пробуем 2 безопасных fallback:
-        # 1) openpyxl — если файл просто ошибочно назван .xls
-        # 2) html table — некоторые старые выгрузки Avito/Excel так сохраняются
         if ext == ".xls":
             try:
                 bio.seek(0)
@@ -798,11 +792,9 @@ def load_hot_watchlist_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
             except Exception:
                 pass
             raise ValueError(
-                "Watchlist в старом формате .xls. На сервере он не читается без xlrd. "
+                "Статистика/Watchlist в старом формате .xls. На сервере он не читается без xlrd. "
                 "Сохрани файл как .xlsx или .csv и загрузи снова."
             )
-
-        # Последняя попытка для файлов без нормального suffix
         try:
             bio.seek(0)
             return pd.read_excel(bio, engine="openpyxl")
@@ -814,7 +806,27 @@ def load_hot_watchlist_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
                 return html_tables[0]
         except Exception:
             pass
-        raise ValueError("Не удалось распознать формат watchlist-файла. Используй .xlsx или .csv.")
+        raise ValueError("Не удалось распознать формат файла статистики. Используй .xlsx или .csv.")
+
+    def _derive_velocity_band(month_value: float) -> str:
+        if month_value >= 30:
+            return "Очень быстро"
+        if month_value >= 10:
+            return "Быстро"
+        if month_value >= 3:
+            return "Стабильно"
+        if month_value > 0:
+            return "Медленно"
+        return "Нет продаж"
+
+    def _derive_abc_class(month_value: float) -> str:
+        if month_value >= 20:
+            return "A"
+        if month_value >= 5:
+            return "B"
+        if month_value > 0:
+            return "C"
+        return "D"
 
     if suffix == ".csv":
         raw = _read_csv_bytes(file_bytes)
@@ -828,48 +840,136 @@ def load_hot_watchlist_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
             "sales_qty_15m", "sales_per_month", "abc_class", "velocity_band",
             "best_supplier", "best_supplier_gap_pct", "buy_signal_30pct", "days_of_cover",
             "priority_score", "action_today", "watch_article_norm", "watch_key_norm",
-            "comparison_article_norm", "match_keys_text",
+            "comparison_article_norm", "match_keys_text", "stats_source_kind",
+            "sales_per_day", "sales_per_week", "sales_per_year", "deals_count",
+            "first_sale", "last_sale", "days_without_sales", "market_min_price",
+            "market_min_supplier", "supplier_presence_text", "our_price_now",
+            "best_supplier_price_now", "best_supplier_stock_now", "our_stock_now",
         ])
+
     raw.columns = [normalize_text(c) for c in raw.columns]
     rows = []
-    for _, r in raw.iterrows():
-        watch_article = normalize_text(r.get("watch_article", ""))
-        watch_key = normalize_text(r.get("watch_key", ""))
-        watch_name = normalize_text(r.get("watch_name", ""))
-        comparison_article = normalize_text(r.get("comparison_article", ""))
-        keys = unique_preserve_order([
-            normalize_article(watch_article),
-            normalize_article(watch_key),
-            normalize_article(comparison_article),
-        ])
-        if not any(keys):
-            continue
-        rows.append({
-            "watch_article": watch_article,
-            "watch_key": watch_key,
-            "watch_name": watch_name,
-            "current_sheet": normalize_watchlist_sheet_name(r.get("current_sheet", "")),
-            "comparison_article": comparison_article,
-            "sales_qty_15m": safe_float(r.get("sales_qty_15m"), 0.0),
-            "sales_per_month": safe_float(r.get("sales_per_month"), 0.0),
-            "abc_class": normalize_text(r.get("abc_class", "")),
-            "velocity_band": normalize_text(r.get("velocity_band", "")),
-            "ledger_end_qty": safe_float(r.get("ledger_end_qty"), 0.0),
-            "our_price_now": safe_float(r.get("our_price_now"), 0.0),
-            "our_stock_now": safe_float(r.get("our_stock_now"), 0.0),
-            "best_supplier": normalize_text(r.get("best_supplier", "")),
-            "best_supplier_price_now": safe_float(r.get("best_supplier_price_now"), 0.0),
-            "best_supplier_stock_now": safe_float(r.get("best_supplier_stock_now"), 0.0),
-            "best_supplier_gap_pct": safe_float(r.get("best_supplier_gap_pct"), 0.0),
-            "buy_signal_30pct": normalize_text(r.get("buy_signal_30pct", "")),
-            "days_of_cover": safe_float(r.get("days_of_cover"), 0.0),
-            "priority_score": safe_float(r.get("priority_score"), 0.0),
-            "action_today": normalize_text(r.get("action_today", "")),
-            "watch_article_norm": normalize_article(watch_article),
-            "watch_key_norm": normalize_article(watch_key),
-            "comparison_article_norm": normalize_article(comparison_article),
-            "match_keys_text": "|".join([k for k in keys if k]),
-        })
+
+    is_velocity_format = {"Артикул", "Наименование", "В месяц"}.issubset(set(raw.columns))
+
+    if is_velocity_format:
+        for _, r in raw.iterrows():
+            watch_article = normalize_text(r.get("Артикул", ""))
+            watch_name = normalize_text(r.get("Наименование", ""))
+            comparison_article = watch_article
+            sales_per_month = safe_float(r.get("В месяц"), 0.0)
+            sales_per_day = safe_float(r.get("В день"), 0.0)
+            sales_per_week = safe_float(r.get("В неделю"), 0.0)
+            sales_per_year = safe_float(r.get("В год"), 0.0)
+            total_sold_qty = safe_float(r.get("Всего шт."), 0.0)
+            deals_count = safe_int(r.get("Сделок", 0), 0)
+            first_sale = normalize_text(r.get("Первая продажа", ""))
+            last_sale = normalize_text(r.get("Последняя продажа", ""))
+            days_without_sales = safe_float(r.get("Дней без продаж"), 0.0)
+            market_min_price = safe_float(r.get("Мин. цена конкурентов"), 0.0)
+            market_min_supplier = normalize_text(r.get("Поставщик (мин.)", ""))
+            supplier_presence_text = normalize_text(r.get("Наличие у поставщиков", ""))
+            our_price_now = safe_float(r.get("Наша цена"), 0.0)
+
+            keys = unique_preserve_order([
+                normalize_article(watch_article),
+                normalize_article(comparison_article),
+            ])
+            if not any(keys):
+                name_codes = build_row_compare_codes("", watch_name)
+                keys.extend([x for x in name_codes if x])
+            if not any(keys):
+                continue
+
+            priority_score = max(sales_per_month, 0.0) * 10.0 + max(deals_count, 0) * 0.2 - min(max(days_without_sales, 0.0), 180.0) * 0.1
+            rows.append({
+                "watch_article": watch_article,
+                "watch_key": watch_article,
+                "watch_name": watch_name,
+                "current_sheet": "",
+                "comparison_article": comparison_article,
+                "sales_qty_15m": total_sold_qty,
+                "sales_per_month": sales_per_month,
+                "abc_class": _derive_abc_class(sales_per_month),
+                "velocity_band": _derive_velocity_band(sales_per_month),
+                "ledger_end_qty": 0.0,
+                "our_price_now": our_price_now,
+                "our_stock_now": 0.0,
+                "best_supplier": market_min_supplier,
+                "best_supplier_price_now": market_min_price,
+                "best_supplier_stock_now": 0.0,
+                "best_supplier_gap_pct": 0.0,
+                "buy_signal_30pct": "",
+                "days_of_cover": 0.0,
+                "priority_score": round(priority_score, 2),
+                "action_today": "",
+                "watch_article_norm": normalize_article(watch_article),
+                "watch_key_norm": normalize_article(watch_article),
+                "comparison_article_norm": normalize_article(comparison_article),
+                "match_keys_text": "|".join([k for k in keys if k]),
+                "stats_source_kind": "velocity",
+                "sales_per_day": sales_per_day,
+                "sales_per_week": sales_per_week,
+                "sales_per_year": sales_per_year,
+                "deals_count": deals_count,
+                "first_sale": first_sale,
+                "last_sale": last_sale,
+                "days_without_sales": days_without_sales,
+                "market_min_price": market_min_price,
+                "market_min_supplier": market_min_supplier,
+                "supplier_presence_text": supplier_presence_text,
+            })
+    else:
+        for _, r in raw.iterrows():
+            watch_article = normalize_text(r.get("watch_article", ""))
+            watch_key = normalize_text(r.get("watch_key", ""))
+            watch_name = normalize_text(r.get("watch_name", ""))
+            comparison_article = normalize_text(r.get("comparison_article", ""))
+            keys = unique_preserve_order([
+                normalize_article(watch_article),
+                normalize_article(watch_key),
+                normalize_article(comparison_article),
+            ])
+            if not any(keys):
+                continue
+            rows.append({
+                "watch_article": watch_article,
+                "watch_key": watch_key,
+                "watch_name": watch_name,
+                "current_sheet": normalize_watchlist_sheet_name(r.get("current_sheet", "")),
+                "comparison_article": comparison_article,
+                "sales_qty_15m": safe_float(r.get("sales_qty_15m"), 0.0),
+                "sales_per_month": safe_float(r.get("sales_per_month"), 0.0),
+                "abc_class": normalize_text(r.get("abc_class", "")),
+                "velocity_band": normalize_text(r.get("velocity_band", "")),
+                "ledger_end_qty": safe_float(r.get("ledger_end_qty"), 0.0),
+                "our_price_now": safe_float(r.get("our_price_now"), 0.0),
+                "our_stock_now": safe_float(r.get("our_stock_now"), 0.0),
+                "best_supplier": normalize_text(r.get("best_supplier", "")),
+                "best_supplier_price_now": safe_float(r.get("best_supplier_price_now"), 0.0),
+                "best_supplier_stock_now": safe_float(r.get("best_supplier_stock_now"), 0.0),
+                "best_supplier_gap_pct": safe_float(r.get("best_supplier_gap_pct"), 0.0),
+                "buy_signal_30pct": normalize_text(r.get("buy_signal_30pct", "")),
+                "days_of_cover": safe_float(r.get("days_of_cover"), 0.0),
+                "priority_score": safe_float(r.get("priority_score"), 0.0),
+                "action_today": normalize_text(r.get("action_today", "")),
+                "watch_article_norm": normalize_article(watch_article),
+                "watch_key_norm": normalize_article(watch_key),
+                "comparison_article_norm": normalize_article(comparison_article),
+                "match_keys_text": "|".join([k for k in keys if k]),
+                "stats_source_kind": "legacy_watchlist",
+                "sales_per_day": safe_float(r.get("sales_per_day"), 0.0),
+                "sales_per_week": safe_float(r.get("sales_per_week"), 0.0),
+                "sales_per_year": safe_float(r.get("sales_per_year"), 0.0),
+                "deals_count": safe_int(r.get("deals_count", 0), 0),
+                "first_sale": normalize_text(r.get("first_sale", "")),
+                "last_sale": normalize_text(r.get("last_sale", "")),
+                "days_without_sales": safe_float(r.get("days_without_sales"), 0.0),
+                "market_min_price": safe_float(r.get("market_min_price"), 0.0),
+                "market_min_supplier": normalize_text(r.get("market_min_supplier", "")),
+                "supplier_presence_text": normalize_text(r.get("supplier_presence_text", "")),
+            })
+
     out = pd.DataFrame(rows)
     return out.reset_index(drop=True)
 
@@ -956,19 +1056,61 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
         (df if isinstance(df, pd.DataFrame) else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Watchlist")
     return out.getvalue()
 
+
 def hot_watchlist_summary_text() -> str:
     hot_df = st.session_state.get("hot_items_df")
     if not isinstance(hot_df, pd.DataFrame) or hot_df.empty:
-        return "watchlist не загружен"
+        return "статистика ещё не загружена"
     buy_count = len(build_hot_buy_watchlist_table())
-    ab_count = int(hot_df.get("abc_class", pd.Series(dtype=object)).fillna("").map(normalize_text).isin(["A", "B"]).sum())
-    return f"Ходовых: {len(hot_df)} • сильный спрос: {ab_count} • можно брать: {buy_count}"
+    strong_count = int(pd.to_numeric(hot_df.get("sales_per_month", pd.Series(dtype=float)), errors="coerce").fillna(0.0).ge(2.0).sum())
+    source_kind = normalize_text(hot_df.get("stats_source_kind", pd.Series(dtype=object)).iloc[0] if "stats_source_kind" in hot_df.columns and not hot_df.empty else "")
+    if source_kind == "velocity":
+        return f"Строк статистики: {len(hot_df)} • сильный спрос: {strong_count} • можно брать: {buy_count}"
+    return f"Ходовых: {len(hot_df)} • сильный спрос: {strong_count} • можно брать: {buy_count}"
 
 def build_hot_buy_watchlist_table() -> pd.DataFrame:
     hot_df = st.session_state.get("hot_items_df")
     if not isinstance(hot_df, pd.DataFrame) or hot_df.empty:
         return pd.DataFrame()
+
     threshold_pct = float(st.session_state.get("distributor_threshold", 35.0) or 35.0)
+    min_qty = float(st.session_state.get("distributor_min_qty", 1.0) or 1.0)
+    sheets = st.session_state.get("comparison_sheets", {})
+    photo_df = st.session_state.get("photo_df")
+    avito_df = st.session_state.get("avito_df")
+
+    sheet_specs = [
+        ("Сравнение", "Оригинал"),
+        ("Уценка", "Уценка"),
+        ("Совместимые", "Совместимые"),
+    ]
+
+    all_parts: list[pd.DataFrame] = []
+    if isinstance(sheets, dict) and sheets:
+        for sheet_name, sheet_label in sheet_specs:
+            sheet_df = sheets.get(sheet_name)
+            if not isinstance(sheet_df, pd.DataFrame) or sheet_df.empty:
+                continue
+            try:
+                products_df = build_crm_workspace_products_df(sheet_df, photo_df, avito_df, min_qty, sheet_name, sheet_label)
+                decision_df = build_procurement_decision_df(products_df)
+                buy_df = filter_procurement_queue(decision_df, "Можно брать")
+                if isinstance(buy_df, pd.DataFrame) and not buy_df.empty:
+                    all_parts.append(buy_df)
+            except Exception:
+                continue
+        if all_parts:
+            out = pd.concat(all_parts, ignore_index=True)
+            if "Разница, %" in out.columns:
+                out = out[pd.to_numeric(out["Разница, %"], errors="coerce").fillna(0.0).ge(float(threshold_pct))].copy()
+            if out.empty:
+                return pd.DataFrame()
+            sort_cols = [c for c in ["Приоритет", "Продажи, шт/мес", "Лист", "Артикул"] if c in out.columns]
+            if sort_cols:
+                ascending = [False if c in {"Приоритет", "Продажи, шт/мес"} else True for c in sort_cols]
+                out = out.sort_values(sort_cols, ascending=ascending, kind="stable")
+            return out.reset_index(drop=True)
+
     work = hot_df.copy()
     buy_mask = work.get("buy_signal_30pct", pd.Series(dtype=object)).fillna("").map(normalize_text).str.upper().eq("BUY")
     work = work.loc[buy_mask].copy()
@@ -985,47 +1127,41 @@ def build_hot_buy_watchlist_table() -> pd.DataFrame:
     if work.empty:
         return pd.DataFrame()
 
-    work["gap_pct_display"] = pd.to_numeric(work.get("best_supplier_gap_pct", 0.0), errors="coerce").fillna(0.0).map(normalize_gap_percent).map(lambda x: round(float(x), 1))
     out = pd.DataFrame({
         "Лист": work.get("current_sheet", ""),
         "Артикул": work.get("comparison_article", work.get("watch_article", "")),
         "Товар": work.get("watch_name", ""),
-        "Ходовая": "Да",
+        "Ходовой": "Да",
         "Спрос, шт/мес": work.get("sales_per_month", 0.0),
         "Наша цена": work.get("our_price_now", 0.0),
         "Наш остаток": work.get("our_stock_now", 0.0),
         "Лучший поставщик": work.get("best_supplier", ""),
         "Цена поставщика": work.get("best_supplier_price_now", 0.0),
         "Остаток поставщика": work.get("best_supplier_stock_now", 0.0),
-        "Ниже нашей цены, %": work.get("gap_pct_display", 0.0),
+        "Разница, %": gap_series.map(lambda x: round(float(x), 1)),
         "Дней запаса": work.get("days_of_cover", 0.0),
         "Приоритет": work.get("priority_score", 0.0),
         "Действие": [translate_watch_action(x, threshold_pct=threshold_pct) for x in work.get("action_today", "")],
     })
-    for col in ["Спрос, шт/мес", "Наша цена", "Наш остаток", "Цена поставщика", "Остаток поставщика", "Ниже нашей цены, %", "Дней запаса", "Приоритет"]:
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
-    out = out.sort_values(["Приоритет", "Спрос, шт/мес"], ascending=[False, False], kind="stable").reset_index(drop=True)
-    return out
+    return out.reset_index(drop=True)
+
 
 def render_hot_buy_watchlist_lazy_panel() -> None:
     global_open = bool(st.session_state.get("show_hot_buy_watchlist_table", False))
-    crm_open = any(
-        bool(v) for k, v in st.session_state.items()
-        if str(k).startswith("crm_show_buy_")
-    )
+    crm_open = any(bool(v) for k, v in st.session_state.items() if str(k).startswith("crm_show_buy_"))
     if not (global_open or crm_open):
         return
+
     buy_df = build_hot_buy_watchlist_table()
     st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
     render_block_header(
         "Ходовые позиции — сейчас можно брать",
-        "Ленивая таблица только по ходовым позициям, где лучший поставщик минимум на 35% дешевле нашей цены.",
+        "Ленивая таблица только по тем позициям, где статистика продаж подтверждена и поставщик проходит твой порог выгоды.",
         icon="🔥",
-        help_text="Показывает только ходовые позиции, где лучший поставщик сейчас минимум на 35% дешевле нашей цены. Таблица не грузится, пока чекбокс в блоке Watchlist выключен.",
+        help_text="Показывает только позиции, где продажи подтверждены статистикой, а лучший поставщик реально проходит твой порог выгоды и имеет остаток.",
     )
     if buy_df.empty:
-        st.info("Сейчас в watchlist нет позиций, где лучший поставщик минимум на 35% дешевле нашей цены.")
+        st.info("Сейчас нет позиций, где поставщик проходит твой порог выгоды и есть подтверждённый сигнал по статистике.")
     else:
         c1, c2 = st.columns([1.2, 1])
         c1.metric("Позиций можно брать", len(buy_df))
@@ -1037,67 +1173,8 @@ def render_hot_buy_watchlist_lazy_panel() -> None:
             key="download_hot_buy_watchlist",
             use_container_width=True,
         )
-
-        f1, f2, f3, f4 = st.columns([1.15, 1.1, 1.2, 1.35])
-        sheet_options = ["Все листы"] + sorted(
-            [x for x in buy_df["Лист"].fillna("").astype(str).unique().tolist() if x.strip()]
-        )
-        selected_sheet = f1.selectbox(
-            "Лист",
-            sheet_options,
-            key="hot_buy_sheet_filter",
-            help="Ограничивает таблицу выбранным листом: Оригинал, Уценка или Совместимые.",
-        )
-        only_hot = f2.checkbox(
-            "Только ходовые",
-            value=True,
-            key="hot_buy_only_hot",
-            help="Показывать только товары с хорошим спросом за выбранный период.",
-        )
-        only_buy = f3.checkbox(
-            "Только можно брать",
-            value=True,
-            key="hot_buy_only_buy",
-            help="Показывать только позиции, где лучший поставщик сейчас минимум на 35% дешевле нашей цены.",
-        )
-        only_attention = f4.checkbox(
-            "Только требует внимания",
-            value=False,
-            key="hot_buy_only_attention",
-            help="Показывать позиции, где кроме выгодной закупки есть ещё действие: пополнить запас, наблюдать или проверить сравнение.",
-        )
-
-        st.caption(
-            "Лист — ограничивает таблицу выбранным разделом. "
-            "Только ходовые — товары с хорошим спросом. "
-            "Только можно брать — позиции, где поставщик сейчас минимум на 35% дешевле нашей цены. "
-            "Только требует внимания — позиции, где кроме выгодной закупки есть ещё действие: пополнить запас, наблюдать или проверить сравнение."
-        )
-
-        filtered_buy_df = buy_df.copy()
-
-        if selected_sheet != "Все листы":
-            filtered_buy_df = filtered_buy_df[filtered_buy_df["Лист"].astype(str) == selected_sheet]
-
-        if only_hot:
-            filtered_buy_df = filtered_buy_df[filtered_buy_df["Ходовая"].astype(str).str.strip().eq("Да")]
-
-        if only_buy:
-            filtered_buy_df = filtered_buy_df[
-                filtered_buy_df["Действие"].fillna("").astype(str).str.contains("Можно брать", regex=False)
-            ]
-
-        if only_attention:
-            filtered_buy_df = filtered_buy_df[
-                filtered_buy_df["Действие"].fillna("").astype(str).str.contains(
-                    "Пополнить запас|Наблюдать|Нет в сравнении", regex=True
-                )
-            ]
-
-        if filtered_buy_df.empty:
-            st.info("По выбранным фильтрам строк не найдено.")
-        else:
-            st.dataframe(filtered_buy_df, use_container_width=True, height=min(640, 80 + len(filtered_buy_df) * 35))
+        grid_key = f"hot_buy_grid_{int(global_open)}_{int(crm_open)}_{len(buy_df)}"
+        st.dataframe(buy_df, use_container_width=True, height=min(560, 120 + max(1, len(buy_df)) * 28), key=grid_key)
     st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -4219,7 +4296,6 @@ def init_state() -> None:
         "app_mode_main": "Каталог",
         "crm_queue_filter": "Все",
         "crm_workspace_article_norm": "",
-        "crm_workspace_tab": "Дашборд",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -6003,15 +6079,15 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    render_sidebar_card_header("Ходовые позиции", "🔥", "Watchlist с продажами за период. Можно хранить на сервере и подсвечивать ходовые позиции прямо в результатах поиска.")
+    render_sidebar_card_header("Статистика продаж / ходовые", "🔥", "Новый файл статистики продаж. Берём продажи/мес из столбца «В месяц» и используем их в CRM, аналитике и решениях по складу.")
     hot_uploaded = st.file_uploader(
-        "Загрузить watchlist",
+        "Загрузить статистику",
         type=["xlsx", "xls", "csv"],
         key="hot_items_uploader",
         label_visibility="collapsed",
-        help="Файл с продажами за период и полями watchlist. Именно он включает подсказки «ходовая / можно брать / невыгодно» в карточках и отчётах.",
+        help="Можно загрузить новый файл статистики продаж или старый watchlist. Для нового файла продажи/мес берутся из столбца «В месяц».",
     )
-    st.caption("ⓘ Watchlist отвечает за спрос, дни запаса, приоритет и решение «можно брать / невыгодно» по ходовым позициям.")
+    st.caption("ⓘ Статистика продаж отвечает за продажи/мес, дни без продаж, спрос и приоритет. Для нового файла продажи/мес берутся из столбца «В месяц».")
     if hot_uploaded is not None:
         try:
             hot_bytes = hot_uploaded.getvalue()
@@ -6024,14 +6100,14 @@ with st.sidebar:
                 st.session_state.hot_items_name = hot_uploaded.name + " • сохранён в /data"
                 st.session_state.hot_items_last_sync_sig = hot_sig
                 st.session_state["hot_upload_applied_sig"] = hot_sig
-                log_operation(f"Обновлён watchlist ходовых: {hot_uploaded.name}", "success")
+                log_operation(f"Обновлена статистика продаж: {hot_uploaded.name}", "success")
         except Exception as exc:
             log_operation(f"Ошибка файла ходовых: {exc}", "warning")
-            st.error(f"Ошибка watchlist: {exc}")
+            st.error(f"Ошибка статистики: {exc}")
     else:
         if not isinstance(st.session_state.get("hot_items_df"), pd.DataFrame):
             load_persisted_watchlist_source_into_state()
-    st.markdown(f'<div class="sidebar-status">Watchlist: {html.escape(st.session_state.get("hot_items_name", "ещё не загружен"))}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sidebar-status">Статистика: {html.escape(st.session_state.get("hot_items_name", "ещё не загружена"))}</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="sidebar-mini">Файл на сервере: {html.escape(str(get_persisted_watchlist_file_path()))}</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="sidebar-mini">{html.escape(hot_watchlist_summary_text())}</div>', unsafe_allow_html=True)
     hot_df_state = st.session_state.get("hot_items_df")
@@ -7502,6 +7578,17 @@ def build_crm_workspace_products_df(
         hot_action_today = normalize_text((hot_rec or {}).get("action_today", ""))
         hot_priority_score = safe_float((hot_rec or {}).get("priority_score"), 0.0)
         hot_best_supplier_gap_pct = normalize_gap_percent((hot_rec or {}).get("best_supplier_gap_pct"))
+        sales_per_day = safe_float((hot_rec or {}).get("sales_per_day"), 0.0)
+        sales_per_week = safe_float((hot_rec or {}).get("sales_per_week"), 0.0)
+        sales_per_year = safe_float((hot_rec or {}).get("sales_per_year"), 0.0)
+        deals_count = safe_int((hot_rec or {}).get("deals_count", 0), 0)
+        first_sale = normalize_text((hot_rec or {}).get("first_sale", ""))
+        last_sale = normalize_text((hot_rec or {}).get("last_sale", ""))
+        days_without_sales = safe_float((hot_rec or {}).get("days_without_sales"), 0.0)
+        market_min_price = safe_float((hot_rec or {}).get("market_min_price"), 0.0)
+        market_min_supplier = normalize_text((hot_rec or {}).get("market_min_supplier", ""))
+        supplier_presence_text = normalize_text((hot_rec or {}).get("supplier_presence_text", ""))
+        stats_source_kind = normalize_text((hot_rec or {}).get("stats_source_kind", ""))
         stock_months = round(own_qty / sales_per_month, 2) if sales_per_month > 0 else None
 
         has_photo = bool(normalize_text(row.get("photo_url", "")))
@@ -7681,6 +7768,17 @@ def build_crm_workspace_products_df(
             "transit_qty": transit_qty,
             "sales_per_month": round(sales_per_month, 2),
             "sales_qty_15m": round(sales_qty_15m, 2),
+            "sales_per_day": round(sales_per_day, 4) if sales_per_day > 0 else 0.0,
+            "sales_per_week": round(sales_per_week, 4) if sales_per_week > 0 else 0.0,
+            "sales_per_year": round(sales_per_year, 2) if sales_per_year > 0 else 0.0,
+            "deals_count": deals_count,
+            "first_sale": first_sale,
+            "last_sale": last_sale,
+            "days_without_sales": days_without_sales if days_without_sales > 0 else None,
+            "market_min_price": market_min_price if market_min_price > 0 else None,
+            "market_min_supplier": market_min_supplier,
+            "supplier_presence_text": supplier_presence_text,
+            "stats_source_kind": stats_source_kind,
             "abc_class": abc_class,
             "velocity_band": velocity_band,
             "stock_months": stock_months,
@@ -7848,10 +7946,6 @@ def apply_pending_catalog_navigation() -> None:
     if pending_label:
         st.session_state["active_workspace_label"] = pending_label
 
-    pending_crm_tab = normalize_text(st.session_state.pop("pending_crm_workspace_tab", ""))
-    if pending_crm_tab:
-        st.session_state["crm_workspace_tab"] = pending_crm_tab
-
     pending_article = normalize_text(st.session_state.pop("pending_catalog_article", ""))
     pending_tab_key = normalize_text(st.session_state.pop("pending_catalog_tab_key", "")) or "original"
     if pending_article:
@@ -7878,7 +7972,6 @@ def open_product_in_crm(article_norm: str, sheet_label: str = "", open_photo_edi
     resolved_label = CRM_SHEET_NAME_TO_LABEL.get(normalize_text(sheet_label), normalize_text(sheet_label) or "Оригинал")
     st.session_state["pending_app_mode_main"] = "CRM workspace"
     st.session_state["pending_active_workspace_label"] = resolved_label
-    st.session_state["pending_crm_workspace_tab"] = "Карточка"
     st.session_state["crm_workspace_article_norm"] = normalize_text(article_norm)
     if open_photo_editor:
         st.session_state["crm_workspace_open_photo_editor_for"] = normalize_text(article_norm)
@@ -8114,7 +8207,7 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         st.write(f"**Размещение:** {normalize_text(row.get('placement_action', '')) or 'Ничего'}")
         st.write(f"**Рынок:** {('ниже нас на ' + str(round(safe_float(row.get('market_gap_pct', 0.0), 0.0), 1)) + '%') if safe_float(row.get('market_gap_pct', 0.0), 0.0) > 0 else 'нет сигнала рынка'}")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Обзор", "Характеристики", "Поставщики", "Задачи"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Обзор", "Характеристики", "Поставщики", "Статистика", "Задачи"])
     with tab1:
         left, right = st.columns(2)
         left.write(f"**Лист:** {normalize_text(row.get('sheet_label', '')) or sheet_label}")
@@ -8276,6 +8369,44 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
             with st.expander("Диагностика офферов", expanded=not bool(valid_offers)):
                 st.dataframe(pd.DataFrame(debug_rows), use_container_width=True, hide_index=True, height=320)
     with tab4:
+        stats_source_kind = normalize_text(row.get("stats_source_kind", ""))
+        has_stats = bool(
+            safe_float(row.get("sales_per_month"), 0.0) > 0
+            or safe_float(row.get("sales_per_day"), 0.0) > 0
+            or safe_float(row.get("sales_per_week"), 0.0) > 0
+            or safe_float(row.get("sales_per_year"), 0.0) > 0
+            or safe_int(row.get("deals_count", 0), 0) > 0
+            or normalize_text(row.get("first_sale", ""))
+            or normalize_text(row.get("last_sale", ""))
+            or safe_float(row.get("days_without_sales"), 0.0) > 0
+            or safe_float(row.get("market_min_price"), 0.0) > 0
+            or normalize_text(row.get("market_min_supplier", ""))
+            or normalize_text(row.get("supplier_presence_text", ""))
+        )
+        if not has_stats:
+            st.info("Статистика по этой позиции не загружена или не сматчилась по артикулу/коду.")
+        else:
+            if stats_source_kind == "velocity":
+                st.caption("Статистика загружена из нового файла скорости продаж. Продажи/мес берутся из столбца «В месяц».")
+            else:
+                st.caption("Статистика загружена из watchlist/файла продаж.")
+            s1, s2, s3 = st.columns(3)
+            s1.write(f"**В день:** {fmt_qty(row.get('sales_per_day', 0.0))}")
+            s1.write(f"**В неделю:** {fmt_qty(row.get('sales_per_week', 0.0))}")
+            s1.write(f"**В месяц:** {fmt_qty(row.get('sales_per_month', 0.0))}")
+            s1.write(f"**В год:** {fmt_qty(row.get('sales_per_year', 0.0)) if safe_float(row.get('sales_per_year'), 0.0) > 0 else '—'}")
+            s2.write(f"**Всего шт.:** {fmt_qty(row.get('sales_qty_15m', 0.0)) if safe_float(row.get('sales_qty_15m'), 0.0) > 0 else '—'}")
+            s2.write(f"**Сделок:** {safe_int(row.get('deals_count', 0), 0) if safe_int(row.get('deals_count', 0), 0) > 0 else '—'}")
+            s2.write(f"**Первая продажа:** {normalize_text(row.get('first_sale', '')) or '—'}")
+            s2.write(f"**Последняя продажа:** {normalize_text(row.get('last_sale', '')) or '—'}")
+            s3.write(f"**Дней без продаж:** {fmt_qty(row.get('days_without_sales', 0.0)) if row.get('days_without_sales', None) not in (None, '') else '—'}")
+            s3.write(f"**Мин. цена конкурентов:** {fmt_price(row.get('market_min_price', 0.0)) if safe_float(row.get('market_min_price'), 0.0) > 0 else '—'}")
+            s3.write(f"**Поставщик (мин.):** {normalize_text(row.get('market_min_supplier', '')) or '—'}")
+            s3.write(f"**Наличие у поставщиков:** {normalize_text(row.get('supplier_presence_text', '')) or '—'}")
+            st.write(f"**Скорость:** {normalize_text(row.get('velocity_band', '')) or '—'}")
+            st.write(f"**ABC:** {normalize_text(row.get('abc_class', '')) or '—'}")
+
+    with tab5:
         task_df = build_task_view_df(sheet_filter=sheet_name)
         if isinstance(task_df, pd.DataFrame) and not task_df.empty:
             task_df = task_df[task_df["Артикул"].fillna("").astype(str).eq(normalize_text(row.get("article", "")))].copy()
@@ -8315,25 +8446,16 @@ def render_crm_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataFrame |
         st.info("По активному листу пока нет данных для CRM workspace.")
         st.markdown('</div>', unsafe_allow_html=True)
         return
-
-    crm_sections = ["Дашборд", "Очереди", "Исполнение", "Pipeline", "Карточка"]
-    current_section = st.radio(
-        "Раздел CRM",
-        options=crm_sections,
-        key="crm_workspace_tab",
-        horizontal=True,
-        label_visibility="collapsed",
-    )
-
-    if current_section == "Дашборд":
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Дашборд", "Очереди", "Исполнение", "Pipeline", "Карточка"])
+    with tab1:
         render_crm_workspace_dashboard(products_df, tasks_df)
-    elif current_section == "Очереди":
+    with tab2:
         render_crm_workspace_queues(products_df)
-    elif current_section == "Исполнение":
+    with tab3:
         render_crm_workspace_execution(products_df)
-    elif current_section == "Pipeline":
+    with tab4:
         render_crm_workspace_pipeline(products_df)
-    else:
+    with tab5:
         render_crm_workspace_card(products_df, sheet_name, sheet_label)
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -9044,182 +9166,3 @@ else:
                 active_tab_key,
             )
             render_sheet_workspace(active_sheet_name, active_tab_label, active_tab_key)
-
-def normalize_watchlist_sheet_name(value: Any) -> str:
-    txt = contains_text(value)
-    if "ОРИГИН" in txt or "СРАВН" in txt:
-        return "Оригинал"
-    if "УЦЕН" in txt:
-        return "Уценка"
-    if "СОВМЕСТ" in txt:
-        return "Совместимые"
-    return normalize_text(value)
-
-
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=4)
-def load_hot_watchlist_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
-    suffix = Path(file_name).suffix.lower()
-    if suffix == ".csv":
-        bio = io.BytesIO(file_bytes)
-        try:
-            raw = pd.read_csv(bio)
-        except UnicodeDecodeError:
-            bio.seek(0)
-            raw = pd.read_csv(bio, encoding="cp1251")
-    else:
-        raw = pd.read_excel(io.BytesIO(file_bytes))
-    raw = raw.dropna(how="all").copy()
-    if raw.empty:
-        return pd.DataFrame(columns=[
-            "watch_article", "watch_key", "watch_name", "current_sheet", "comparison_article",
-            "sales_qty_15m", "sales_per_month", "abc_class", "velocity_band",
-            "best_supplier", "best_supplier_gap_pct", "buy_signal_30pct", "days_of_cover",
-            "priority_score", "action_today", "watch_article_norm", "watch_key_norm",
-            "comparison_article_norm", "match_keys_text",
-        ])
-    raw.columns = [normalize_text(c) for c in raw.columns]
-    rows = []
-    for _, r in raw.iterrows():
-        watch_article = normalize_text(r.get("watch_article", ""))
-        watch_key = normalize_text(r.get("watch_key", ""))
-        watch_name = normalize_text(r.get("watch_name", ""))
-        comparison_article = normalize_text(r.get("comparison_article", ""))
-        keys = unique_preserve_order([
-            normalize_article(watch_article),
-            normalize_article(watch_key),
-            normalize_article(comparison_article),
-        ])
-        if not any(keys):
-            continue
-        rows.append({
-            "watch_article": watch_article,
-            "watch_key": watch_key,
-            "watch_name": watch_name,
-            "current_sheet": normalize_watchlist_sheet_name(r.get("current_sheet", "")),
-            "comparison_article": comparison_article,
-            "sales_qty_15m": safe_float(r.get("sales_qty_15m"), 0.0),
-            "sales_per_month": safe_float(r.get("sales_per_month"), 0.0),
-            "abc_class": normalize_text(r.get("abc_class", "")),
-            "velocity_band": normalize_text(r.get("velocity_band", "")),
-            "best_supplier": normalize_text(r.get("best_supplier", "")),
-            "best_supplier_gap_pct": safe_float(r.get("best_supplier_gap_pct"), 0.0),
-            "buy_signal_30pct": normalize_text(r.get("buy_signal_30pct", "")),
-            "days_of_cover": safe_float(r.get("days_of_cover"), 0.0),
-            "priority_score": safe_float(r.get("priority_score"), 0.0),
-            "action_today": normalize_text(r.get("action_today", "")),
-            "watch_article_norm": normalize_article(watch_article),
-            "watch_key_norm": normalize_article(watch_key),
-            "comparison_article_norm": normalize_article(comparison_article),
-            "match_keys_text": "|".join([k for k in keys if k]),
-        })
-    out = pd.DataFrame(rows)
-    return out.reset_index(drop=True)
-
-
-def build_hot_watchlist_lookup(hot_df: pd.DataFrame | None, tab_label: str = "") -> dict[str, list[dict[str, Any]]]:
-    if not isinstance(hot_df, pd.DataFrame) or hot_df.empty:
-        return {}
-    work = hot_df.copy()
-    tab_label = normalize_text(tab_label)
-    if tab_label:
-        filtered = work[(work["current_sheet"] == "") | (work["current_sheet"] == tab_label)].copy()
-        if not filtered.empty:
-            work = filtered
-    lookup: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for _, row in work.iterrows():
-        rec = row.to_dict()
-        keys = [normalize_article(x) for x in normalize_text(rec.get("match_keys_text", "")).split("|") if normalize_article(x)]
-        if not keys:
-            continue
-        for key in keys:
-            lookup[key].append(rec)
-    return lookup
-
-
-def pick_hot_watch_rec(row: pd.Series, lookup: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
-    if not lookup:
-        return None
-    candidate_keys = []
-    article_norm = normalize_article(row.get("article_norm", row.get("article", "")))
-    if article_norm:
-        candidate_keys.append(article_norm)
-    row_codes = row.get("row_codes")
-    if isinstance(row_codes, list):
-        candidate_keys.extend([normalize_article(x) for x in row_codes if normalize_article(x)])
-    best = None
-    best_score = -10**18
-    seen = set()
-    for key in candidate_keys:
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        for rec in lookup.get(key, []):
-            score = safe_float(rec.get("priority_score"), 0.0)
-            if normalize_text(rec.get("buy_signal_30pct", "")).upper() == "BUY":
-                score += 100000.0
-            if key == normalize_article(rec.get("comparison_article_norm", "")):
-                score += 1000.0
-            elif key == normalize_article(rec.get("watch_article_norm", "")):
-                score += 500.0
-            if score > best_score:
-                best = rec
-                best_score = score
-    return best
-
-
-def apply_hot_watchlist(df: pd.DataFrame | None, hot_df: pd.DataFrame | None, tab_label: str = "") -> pd.DataFrame | None:
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return df
-    if not isinstance(hot_df, pd.DataFrame) or hot_df.empty:
-        return df
-    lookup = build_hot_watchlist_lookup(hot_df, tab_label=tab_label)
-    if not lookup:
-        return df
-    work = df.copy()
-    matches = [pick_hot_watch_rec(row, lookup) for _, row in work.iterrows()]
-    work["hot_flag"] = [bool(m) for m in matches]
-    work["hot_sales_per_month"] = [safe_float((m or {}).get("sales_per_month"), 0.0) for m in matches]
-    work["hot_priority_score"] = [safe_float((m or {}).get("priority_score"), 0.0) for m in matches]
-    work["hot_abc_class"] = [normalize_text((m or {}).get("abc_class", "")) for m in matches]
-    work["hot_velocity_band"] = [normalize_text((m or {}).get("velocity_band", "")) for m in matches]
-    work["hot_action_today"] = [normalize_text((m or {}).get("action_today", "")) for m in matches]
-    work["hot_buy_signal"] = [normalize_text((m or {}).get("buy_signal_30pct", "")) for m in matches]
-    work["hot_best_supplier"] = [normalize_text((m or {}).get("best_supplier", "")) for m in matches]
-    work["hot_best_supplier_gap_pct"] = [safe_float((m or {}).get("best_supplier_gap_pct"), 0.0) for m in matches]
-    work["hot_watch_article"] = [normalize_text((m or {}).get("watch_article", "")) for m in matches]
-    return work
-
-
-
-
-def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    out = io.BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        (df if isinstance(df, pd.DataFrame) else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Watchlist")
-    return out.getvalue()
-
-def hot_watchlist_summary_text() -> str:
-    hot_df = st.session_state.get("hot_items_df")
-    if not isinstance(hot_df, pd.DataFrame) or hot_df.empty:
-        return "watchlist не загружен"
-    buy_count = len(build_hot_buy_watchlist_table())
-    ab_count = int(hot_df.get("abc_class", pd.Series(dtype=object)).fillna("").map(normalize_text).isin(["A", "B"]).sum())
-    return f"Ходовых: {len(hot_df)} • сильный спрос: {ab_count} • можно брать: {buy_count}"
-
-def hot_supplier_note(row: pd.Series | dict | None, best: dict | None, threshold_pct: float = 35.0) -> tuple[str, str]:
-    help_text = "Товар ходовой → товар хорошо продавался за выбранный период"
-    if not best:
-        help_text += f"\nСейчас брать невыгодно → нет поставщика с ценой минимум на {threshold_pct:.0f}% ниже нашей цены"
-        return "Сейчас брать невыгодно", help_text
-
-    source = normalize_text((best or {}).get("source", ""))
-    delta_pct = safe_float((best or {}).get("delta_percent"), 0.0)
-    if delta_pct >= float(threshold_pct):
-        action_text = f"Сейчас можно брать у {source}" if source else "Сейчас можно брать"
-        help_text += f"\nСейчас можно брать → лучший поставщик сейчас минимум на {threshold_pct:.0f}% дешевле нашей цены"
-        return action_text, help_text
-
-    help_text += f"\nСейчас брать невыгодно → нет поставщика с ценой минимум на {threshold_pct:.0f}% ниже нашей цены"
-    return "Сейчас брать невыгодно", help_text
-
-
