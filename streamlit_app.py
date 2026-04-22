@@ -2106,11 +2106,22 @@ def natural_chunks(value: str) -> list[object]:
     return result
 
 
+def _safe_natural_sort_chunks(text: str) -> tuple[tuple[int, object], ...]:
+    chunks = natural_chunks(text)
+    normalized: list[tuple[int, object]] = []
+    for chunk in chunks:
+        if isinstance(chunk, (int, float)):
+            normalized.append((0, int(chunk)))
+        else:
+            normalized.append((1, str(chunk)))
+    return tuple(normalized)
+
+
 def series_sort_key(candidate: dict[str, object]) -> tuple[object, ...]:
     article_norm = str(candidate.get("article_norm", ""))
     family, suffix = split_article_family_suffix(article_norm)
     rank = SERIES_SUFFIX_ORDER.get(suffix, 50)
-    return (*natural_chunks(family), rank, suffix, article_norm)
+    return (_safe_natural_sort_chunks(family), rank, suffix, article_norm)
 
 
 def get_series_candidates(df: pd.DataFrame, raw_query: str) -> dict[str, object]:
@@ -8339,12 +8350,20 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         m4.metric("Avito", safe_int(row.get("avito_count", 0), 0))
         m5.metric("Источник meta", normalize_text(row.get("meta_source_sheet", "")) or "—")
         m6.metric("Pipeline", normalize_text(row.get("pipeline_status", "")) or "Новая")
+        threshold_pct = float(st.session_state.get("distributor_threshold", 35.0) or 35.0)
+        market_signal = _classify_procurement_market_signals(
+            {"Наша цена": row.get("sale_price", 0.0), "supplier_valid_offers": row.get("supplier_valid_offers", []) or []},
+            threshold_pct=threshold_pct,
+        )
         st.success(f"Решение: {normalize_text(row.get('decision', 'Проверить вручную'))}")
         st.caption(normalize_text(row.get("decision_reason", "Недостаточно явного сигнала")))
         st.write(f"**Склад:** {normalize_text(row.get('stock_action', '')) or 'Проверить вручную'}")
         st.write(f"**Цена:** {normalize_text(row.get('price_action', '')) or 'Оставить цену'}")
         st.write(f"**Размещение:** {normalize_text(row.get('placement_action', '')) or 'Ничего'}")
-        st.write(f"**Рынок:** {( 'ниже нас на ' + str(round(safe_float(row.get('market_gap_pct', 0.0), 0.0), 1)) + '%' ) if safe_float(row.get('market_gap_pct', 0.0), 0.0) > 0 else 'нет сигнала рынка'}")
+        ms1, ms2, ms3 = st.columns(3)
+        ms1.metric("Рынок vs наша цена", normalize_text(market_signal.get("market_vs_our_price", "нет сигнала")) or "нет сигнала")
+        ms2.metric("Сигнал закупки", normalize_text(market_signal.get("buy_signal_flag", "Нет")) or "Нет")
+        ms3.metric("Сигнал цены", normalize_text(market_signal.get("price_signal_flag", "Проверить")) or "Проверить")
 
     card_section = st.radio(
         "Раздел карточки",
@@ -8356,12 +8375,19 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
 
     if card_section == "Обзор":
         left, right = st.columns(2)
+        threshold_pct = float(st.session_state.get("distributor_threshold", 35.0) or 35.0)
+        market_signal = _classify_procurement_market_signals(
+            {"Наша цена": row.get("sale_price", 0.0), "supplier_valid_offers": row.get("supplier_valid_offers", []) or []},
+            threshold_pct=threshold_pct,
+        )
         left.write(f"**Лист:** {normalize_text(row.get('sheet_label', '')) or sheet_label}")
         left.write(f"**Фото:** {'Да' if bool(row.get('has_photo')) else 'Нет'}")
         left.write(f"**Лучший поставщик:** {normalize_text(row.get('best_source', '')) or '—'}")
         if not normalize_text(row.get('best_source', '')):
             left.caption("Сейчас дешевле нашей цены поставщика нет.")
-        left.write(f"**Статус рынка:** {'ниже нас' if safe_float(row.get('market_gap_pct', 0.0), 0.0) > 0 else 'нет сигнала рынка'}")
+        left.write(f"**Рынок vs наша цена:** {normalize_text(market_signal.get('market_vs_our_price', 'нет сигнала')) or 'нет сигнала'}")
+        left.write(f"**Сигнал закупки:** {normalize_text(market_signal.get('buy_signal_flag', 'Нет')) or 'Нет'}")
+        left.write(f"**Сигнал цены:** {normalize_text(market_signal.get('price_signal_flag', 'Проверить')) or 'Проверить'}")
         if safe_float(row.get("purchase_avg_cost"), 0.0) > 0:
             left.write(f"**Средняя закупка:** {fmt_price(row.get('purchase_avg_cost', 0.0))}")
             left.caption(f"Источник закупки: {normalize_text(row.get('purchase_match_source', '')) or '—'} • {normalize_text(row.get('purchase_source_name', '')) or 'без названия'}")
@@ -8732,6 +8758,205 @@ def render_analytics_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataF
     st.markdown('</div>', unsafe_allow_html=True)
 
 
+def classify_search_procurement_stock_status(row: pd.Series | dict[str, Any]) -> str:
+    stock_months = safe_float((row or {}).get("Запас, мес", None), 0.0) if isinstance(row, dict) else safe_float(row.get("Запас, мес", None), 0.0)
+    sales_pm = safe_float((row or {}).get("Продажи, шт/мес", None), 0.0) if isinstance(row, dict) else safe_float(row.get("Продажи, шт/мес", None), 0.0)
+    own_qty = parse_qty_generic((row or {}).get("Наш остаток", 0.0)) if isinstance(row, dict) else parse_qty_generic(row.get("Наш остаток", 0.0))
+    stale = normalize_text((row or {}).get("Залежался", "")) if isinstance(row, dict) else normalize_text(row.get("Залежался", ""))
+    overstock = normalize_text((row or {}).get("Избыточный запас", "")) if isinstance(row, dict) else normalize_text(row.get("Избыточный запас", ""))
+    low = normalize_text((row or {}).get("Низкий запас", "")) if isinstance(row, dict) else normalize_text(row.get("Низкий запас", ""))
+    hot = normalize_text((row or {}).get("Ходовой", "")) if isinstance(row, dict) else normalize_text(row.get("Ходовой", ""))
+
+    if stale == "Да":
+        return "Залежалый"
+    if overstock == "Да" or stock_months > 6.0:
+        return "Избыточный запас"
+    if sales_pm <= 0.3 and own_qty > 0:
+        return "Нет движения"
+    if low == "Да":
+        return "Низкий запас"
+    if hot == "Да":
+        return "Ходовой"
+    if own_qty <= 0:
+        return "Нет остатка"
+    return "Норма"
+
+
+def _classify_procurement_market_signals(row: pd.Series | dict[str, Any], threshold_pct: float = 35.0) -> dict[str, Any]:
+    own_price = safe_float((row or {}).get("Наша цена", None), 0.0) if isinstance(row, dict) else safe_float(row.get("Наша цена", None), 0.0)
+    offers = []
+    if isinstance(row, dict):
+        offers = row.get("supplier_valid_offers", []) or []
+    else:
+        offers = row.get("supplier_valid_offers", []) or []
+    valid_prices = sorted([safe_float((o or {}).get("price"), 0.0) for o in offers if safe_float((o or {}).get("price"), 0.0) > 0])
+    if own_price <= 0 or not valid_prices:
+        return {
+            "market_vs_our_price": "нет сигнала",
+            "buy_signal_flag": "Нет",
+            "price_signal_flag": "Проверить",
+            "market_below_pct": None,
+            "market_above_pct": None,
+            "supplier_price_any": None,
+        }
+
+    best_market_price = valid_prices[0]
+    if abs(best_market_price - own_price) < 1e-9:
+        return {
+            "market_vs_our_price": "на уровне нашей цены",
+            "buy_signal_flag": "Нет",
+            "price_signal_flag": "Оставить",
+            "market_below_pct": 0.0,
+            "market_above_pct": 0.0,
+            "supplier_price_any": best_market_price,
+        }
+
+    if best_market_price < own_price:
+        gap_pct = round(((own_price - best_market_price) / own_price) * 100.0, 2) if own_price > 0 else 0.0
+        return {
+            "market_vs_our_price": f"ниже на {gap_pct:.1f}%",
+            "buy_signal_flag": "Да" if gap_pct >= float(threshold_pct) else "Нет",
+            "price_signal_flag": "Нет",
+            "market_below_pct": gap_pct,
+            "market_above_pct": None,
+            "supplier_price_any": best_market_price,
+        }
+
+    gap_pct = round(((best_market_price - own_price) / own_price) * 100.0, 2) if own_price > 0 else 0.0
+    price_signal = "Поднять" if gap_pct >= 5.0 else "Оставить"
+    return {
+        "market_vs_our_price": f"выше на {gap_pct:.1f}%",
+        "buy_signal_flag": "Нет",
+        "price_signal_flag": price_signal,
+        "market_below_pct": None,
+        "market_above_pct": gap_pct,
+        "supplier_price_any": best_market_price,
+    }
+
+
+def build_search_procurement_summary_df(
+    result_df: pd.DataFrame | None,
+    photo_df: pd.DataFrame | None,
+    avito_df: pd.DataFrame | None,
+    min_qty: float,
+    sheet_name: str,
+    sheet_label: str,
+) -> pd.DataFrame:
+    if not isinstance(result_df, pd.DataFrame) or result_df.empty:
+        return pd.DataFrame()
+
+    products_df = build_crm_workspace_products_df(result_df, photo_df, avito_df, min_qty, sheet_name, sheet_label)
+    if not isinstance(products_df, pd.DataFrame) or products_df.empty:
+        return pd.DataFrame()
+
+    decision_df = build_procurement_decision_df(products_df)
+    if not isinstance(decision_df, pd.DataFrame) or decision_df.empty:
+        return pd.DataFrame()
+
+    extra_cols = [
+        c for c in [
+            "article_norm", "purchase_avg_cost", "purchase_match_source", "purchase_source_name",
+            "purchase_source_sheet", "recommended_price", "decision_reason", "best_source",
+            "best_price", "best_qty", "open_tasks", "pipeline_status", "current_queue",
+            "supplier_valid_offers",
+        ] if c in products_df.columns
+    ]
+    extra_df = products_df[extra_cols].copy() if extra_cols else pd.DataFrame()
+    merged = decision_df.merge(extra_df, on="article_norm", how="left", suffixes=("", "_prod")) if not extra_df.empty else decision_df.copy()
+
+    out = merged.copy()
+    out["Средняя закупка"] = pd.to_numeric(out.get("purchase_avg_cost", None), errors="coerce")
+    out["Наценка, ₽"] = out.apply(
+        lambda r: safe_float(r.get("Наша цена"), 0.0) - safe_float(r.get("Средняя закупка"), 0.0)
+        if safe_float(r.get("Средняя закупка"), 0.0) > 0 and safe_float(r.get("Наша цена"), 0.0) > 0 else None,
+        axis=1,
+    )
+    out["Наценка, %"] = out.apply(
+        lambda r: round(((safe_float(r.get("Наша цена"), 0.0) - safe_float(r.get("Средняя закупка"), 0.0)) / safe_float(r.get("Средняя закупка"), 0.0)) * 100.0, 2)
+        if safe_float(r.get("Средняя закупка"), 0.0) > 0 and safe_float(r.get("Наша цена"), 0.0) > 0 else None,
+        axis=1,
+    )
+    out["Склад по закупке"] = out.apply(
+        lambda r: round(safe_float(r.get("Средняя закупка"), 0.0) * parse_qty_generic(r.get("Наш остаток")), 2)
+        if safe_float(r.get("Средняя закупка"), 0.0) > 0 and parse_qty_generic(r.get("Наш остаток")) > 0 else None,
+        axis=1,
+    )
+    out["Статус склада"] = out.apply(classify_search_procurement_stock_status, axis=1)
+    out["Фото"] = out.get("Есть фото", "")
+    out["Avito"] = out.get("Есть Avito", "")
+    out["Открытых задач"] = pd.to_numeric(out.get("Открытых задач", out.get("open_tasks", 0)), errors="coerce").fillna(0).astype(int)
+    out["Pipeline"] = out.get("Pipeline", out.get("pipeline_status", ""))
+    out["Очередь"] = out.get("Очередь", out.get("current_queue", ""))
+
+    threshold_pct = float(st.session_state.get("distributor_threshold", 35.0) or 35.0)
+    signal_records = out.apply(lambda r: _classify_procurement_market_signals(r, threshold_pct=threshold_pct), axis=1)
+    signal_df = pd.DataFrame(list(signal_records)) if len(signal_records) else pd.DataFrame()
+    if not signal_df.empty:
+        signal_df.index = out.index
+        out["Рынок vs наша цена"] = signal_df.get("market_vs_our_price")
+        out["Сигнал закупки"] = signal_df.get("buy_signal_flag")
+        out["Сигнал цены"] = signal_df.get("price_signal_flag")
+        out["Рынок ниже, %"] = signal_df.get("market_below_pct")
+        out["Рынок выше, %"] = signal_df.get("market_above_pct")
+        out["Лучшая цена рынка"] = signal_df.get("supplier_price_any")
+    else:
+        out["Рынок vs наша цена"] = "нет сигнала"
+        out["Сигнал закупки"] = "Нет"
+        out["Сигнал цены"] = "Проверить"
+
+    preferred = [
+        "Артикул", "Товар", "Наш остаток", "Наша цена", "Средняя закупка", "Наценка, ₽", "Наценка, %",
+        "Продажи, шт/мес", "Запас, мес", "Статус склада", "Лучший поставщик", "Цена поставщика",
+        "Разница, %", "Рынок vs наша цена", "Сигнал закупки", "Сигнал цены", "Рекомендованная цена",
+        "Фото", "Avito", "Решение", "Почему", "Открытых задач", "Pipeline", "Очередь",
+    ]
+    keep = [c for c in preferred if c in out.columns]
+    out = out[keep].copy()
+    return out.reset_index(drop=True)
+
+
+def render_search_procurement_summary_block(
+    result_df: pd.DataFrame | None,
+    photo_df: pd.DataFrame | None,
+    avito_df: pd.DataFrame | None,
+    min_qty: float,
+    sheet_name: str,
+    sheet_label: str,
+    tab_key: str,
+) -> None:
+    summary_df = build_search_procurement_summary_df(result_df, photo_df, avito_df, min_qty, sheet_name, sheet_label)
+    if not isinstance(summary_df, pd.DataFrame) or summary_df.empty:
+        return
+
+    st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
+    render_block_header(
+        f"{sheet_label} — закупочная сводка по найденным позициям",
+        "Одна главная таблица для быстрого решения по товару: остаток, цена, закупка, продажи, запас, рынок и итоговое действие.",
+        icon="📌",
+        help_text="Это быстрый слой для закупщика под поиском. Идея — не ходить по CRM и вкладкам ради базового решения по позиции.",
+    )
+    st.caption("ⓘ Здесь собрана вся ключевая информация по найденным товарам в одном месте: склад, экономика, спрос, рынок и итоговое решение.")
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Позиций", len(summary_df))
+    m2.metric("Вход 35%+", int(summary_df.get("Сигнал закупки", pd.Series(dtype=object)).fillna("").astype(str).eq("Да").sum()))
+    m3.metric("Можно поднять цену", int(summary_df.get("Сигнал цены", pd.Series(dtype=object)).fillna("").astype(str).eq("Поднять").sum()))
+    m4.metric("Залежалый / не покупать", int(summary_df.get("Решение", pd.Series(dtype=object)).fillna("").astype(str).isin(["Не покупать", "Распродавать"]).sum()))
+    m5.metric("Требуют цены", int(summary_df.get("Решение", pd.Series(dtype=object)).fillna("").astype(str).isin(["Пересмотреть цену"]).sum()))
+
+    view_df = summary_df.copy()
+    st.dataframe(view_df, use_container_width=True, hide_index=True, height=min(560, 140 + len(view_df) * 35))
+    st.download_button(
+        "⬇️ Скачать закупочную сводку",
+        report_to_excel_bytes(view_df),
+        file_name=f"procurement_summary_{tab_key}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key=f"download_procurement_summary_{tab_key}",
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
 def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> None:
     search_key = f"search_input_{tab_key}"
     search_widget_key = f"search_input_widget_{tab_key}"
@@ -8947,6 +9172,15 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
             compare_map = build_distributor_compare(result_df, min_qty=min_dist_qty)
             render_results_insight_dashboard(display_result_df, compare_map, source_pairs)
             render_results_table(display_result_df.head(200), price_mode, round100, custom_discount, distributor_map=compare_map, show_photos=show_photos)
+            render_search_procurement_summary_block(
+                display_result_df,
+                photo_df,
+                st.session_state.get("avito_df"),
+                min_dist_qty,
+                sheet_name,
+                tab_label,
+                tab_key,
+            )
             st.download_button(
                 "⬇️ Скачать результаты в Excel",
                 to_excel_bytes(display_result_df, price_mode, round100, custom_discount, min_dist_qty),
