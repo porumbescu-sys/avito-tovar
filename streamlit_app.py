@@ -6456,6 +6456,30 @@ st.markdown("""
 .helper-switch-note {font-size:12px; color:#64748b; line-height:1.45; padding-top:8px;}
 .catalog-helper-hint {margin-top: 8px; color: #64748b; line-height: 1.45; font-size: 12px;}
 @media (max-width: 1100px){.summary-pill-row{grid-template-columns:repeat(2,minmax(0,1fr));}.main-shell-top{flex-direction:column; align-items:flex-start;}}
+.workspace-topbar-card{background:linear-gradient(180deg,#fbfdff 0%,#f3f7ff 100%); border:1px solid #dbe7ff; border-radius:22px; padding:16px 18px; margin:10px 0 14px 0; box-shadow:0 8px 24px rgba(15,23,42,.05);}
+.workspace-topbar-title{font-size:13px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; color:#2563eb; margin-bottom:8px;}
+.workspace-topbar-meta{font-size:12px; color:#64748b; line-height:1.5; margin-top:8px;}
+.compact-chip-note{display:inline-flex; align-items:center; gap:8px; padding:7px 11px; border-radius:999px; background:#fff; border:1px solid #dbeafe; color:#334155; font-size:12px; font-weight:700; margin-right:8px; margin-top:6px;}
+.admin-soft-card{background:#ffffff; border:1px solid #e5edf8; border-radius:20px; padding:14px 16px; margin:10px 0 14px 0;}
+.admin-soft-title{font-size:15px; font-weight:800; color:#0f172a; margin-bottom:4px;}
+.admin-soft-sub{font-size:12px; color:#64748b; line-height:1.45;}
+.series-compact-grid{display:grid; grid-template-columns:minmax(0,1.4fr) minmax(0,1fr); gap:14px; align-items:start; margin:10px 0 12px 0;}
+.series-compact-actions{display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px;}
+.workspace-segment-wrap{background:#fff; border:1px solid #e5edf8; border-radius:18px; padding:12px 14px; margin:10px 0 14px 0;}
+.workspace-mini-caption{font-size:12px; color:#64748b; line-height:1.5; margin-top:8px;}
+.workspace-grid-metrics{display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:12px 0 6px 0;}
+.workspace-grid-metrics .metric-box{background:#f8fbff; border:1px solid #e5edf8; border-radius:16px; padding:12px 14px;}
+.workspace-grid-metrics .metric-cap{font-size:12px; color:#64748b; margin-bottom:6px;}
+.workspace-grid-metrics .metric-val{font-size:30px; line-height:1; font-weight:800; color:#0f172a;}
+.section-shell-card{background:linear-gradient(180deg,#ffffff 0%,#fbfdff 100%); border:1px solid #e5edf8; border-radius:22px; padding:18px 18px 14px 18px; margin:12px 0 16px 0; box-shadow:0 8px 18px rgba(15,23,42,.04);}
+.section-shell-top{display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:10px;}
+.section-shell-badge{display:inline-flex; align-items:center; gap:8px; padding:7px 11px; border-radius:999px; background:#eef4ff; color:#2563eb; font-size:12px; font-weight:800;}
+.section-shell-title{font-size:28px; line-height:1.1; color:#0f172a; font-weight:800; margin-top:8px;}
+.section-shell-sub{font-size:13px; color:#64748b; margin-top:6px; line-height:1.5; max-width:900px;}
+.section-shell-side{display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px;}
+.section-shell-side .stat-pill{display:inline-flex; align-items:center; gap:8px; padding:7px 11px; border-radius:999px; background:#fff; border:1px solid #e5edf8; color:#334155; font-size:12px; font-weight:700;}
+.slim-divider{height:1px; background:linear-gradient(90deg,rgba(148,163,184,.0),rgba(148,163,184,.6),rgba(148,163,184,.0)); margin:10px 0 2px 0;}
+@media (max-width: 1100px){.series-compact-grid{grid-template-columns:1fr;}.series-compact-actions{grid-template-columns:1fr;}.workspace-grid-metrics{grid-template-columns:repeat(2,minmax(0,1fr));}.section-shell-top{flex-direction:column;}.section-shell-side{justify-content:flex-start;}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -8612,18 +8636,35 @@ def render_crm_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataFrame |
     products_df = get_cached_crm_workspace_products_df(sheet_df, photo_df, avito_df, min_qty, sheet_name, sheet_label)
     tasks_df = build_task_view_df(sheet_filter=sheet_name)
     decision_df = get_cached_procurement_decision_df(products_df)
-    st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-    render_block_header(
-        f"CRM workspace — {sheet_label}",
-        "Отдельный рабочий слой закупщика: дашборд, очереди, исполнение, pipeline, задачи и CRM-карточка без обычного поиска сверху.",
-        icon="🧭",
-        help_text="Это отдельное рабочее пространство поверх стабильного ядра comparison. Каталог ниже не трогается, пока режим CRM не включён.",
+    st.markdown('<div class="section-shell-card">', unsafe_allow_html=True)
+    open_tasks = task_summary_counts().get("open", 0)
+    stale_count = int((decision_df["Залежался"] == "Да").sum()) if isinstance(decision_df, pd.DataFrame) and not decision_df.empty else 0
+    buy_count = int((decision_df["Можно закупать"] == "Да").sum()) if isinstance(decision_df, pd.DataFrame) and not decision_df.empty else 0
+    st.markdown(
+        f"""
+        <div class='section-shell-top'>
+          <div>
+            <div class='section-shell-badge'>🧭 CRM workspace · {html.escape(sheet_label)}</div>
+            <div class='section-shell-title'>Глубокая обработка позиции</div>
+            <div class='section-shell-sub'>Здесь оставляем только рабочий слой закупщика: очереди, исполнение, pipeline, задачи и карточку. Главная остаётся лёгкой и отвечает за быстрое решение по позиции.</div>
+          </div>
+          <div class='section-shell-side'>
+            <div class='stat-pill'>Лист: {html.escape(sheet_label)}</div>
+            <div class='stat-pill'>Открытых задач: {open_tasks}</div>
+            <div class='stat-pill'>Можно закупать: {buy_count}</div>
+            <div class='stat-pill'>Залежалый риск: {stale_count}</div>
+          </div>
+        </div>
+        <div class='slim-divider'></div>
+        """,
+        unsafe_allow_html=True,
     )
     if not isinstance(products_df, pd.DataFrame) or products_df.empty:
         st.info("По активному листу пока нет данных для CRM workspace.")
         st.markdown('</div>', unsafe_allow_html=True)
         return
 
+    st.markdown('<div class="workspace-segment-wrap">', unsafe_allow_html=True)
     section = st.radio(
         "Раздел CRM",
         ["Дашборд", "Очереди", "Исполнение", "Pipeline", "Карточка"],
@@ -8631,6 +8672,7 @@ def render_crm_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataFrame |
         horizontal=True,
         label_visibility="collapsed",
     )
+    st.markdown("<div class='workspace-mini-caption'>Главная остаётся под быстрые решения. Здесь держим только обработку: очереди, действия, pipeline и карточку товара.</div></div>", unsafe_allow_html=True)
     if section == "Дашборд":
         render_crm_workspace_dashboard(products_df, tasks_df, decision_df=decision_df)
     elif section == "Очереди":
@@ -8648,12 +8690,26 @@ def render_analytics_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataF
     products_df = get_cached_crm_workspace_products_df(sheet_df, photo_df, avito_df, min_qty, sheet_name, sheet_label)
     bundle = get_cached_operational_analytics_bundle(sheet_df, photo_df, avito_df, min_qty, sheet_label, st.session_state.get("hot_items_df")) if isinstance(sheet_df, pd.DataFrame) and not sheet_df.empty else {}
     decision_df = get_cached_procurement_decision_df(products_df)
-    st.markdown('<div class="result-wrap">', unsafe_allow_html=True)
-    render_block_header(
-        f"Аналитика — {sheet_label}",
-        "Отдельный аналитический экран поверх текущего листа: рынок, спрос, качество карточек, склад и действия закупщика без вмешательства в старое ядро.",
-        icon="📊",
-        help_text="Это отдельный read-only слой аналитики. Он использует те же comparison / фото / Avito / watchlist данные, но не заменяет каталог и не ломает CRM workspace.",
+    st.markdown('<div class="section-shell-card">', unsafe_allow_html=True)
+    can_buy_count = int((decision_df["Можно закупать"] == "Да").sum()) if isinstance(decision_df, pd.DataFrame) and not decision_df.empty else 0
+    dead_count = int((decision_df["Залежался"] == "Да").sum()) if isinstance(decision_df, pd.DataFrame) and not decision_df.empty else 0
+    st.markdown(
+        f"""
+        <div class='section-shell-top'>
+          <div>
+            <div class='section-shell-badge'>📊 Аналитика · {html.escape(sheet_label)}</div>
+            <div class='section-shell-title'>Картина по листу без визуального шума</div>
+            <div class='section-shell-sub'>Этот экран оставляем только под чтение: рынок, спрос, качество карточек, склад и действия закупщика. Ничего не меняем в ядре comparison — только подаём данные в более собранном виде.</div>
+          </div>
+          <div class='section-shell-side'>
+            <div class='stat-pill'>Позиций: {len(products_df) if isinstance(products_df, pd.DataFrame) else 0}</div>
+            <div class='stat-pill'>Можно закупать: {can_buy_count}</div>
+            <div class='stat-pill'>Залежалые: {dead_count}</div>
+          </div>
+        </div>
+        <div class='slim-divider'></div>
+        """,
+        unsafe_allow_html=True,
     )
     if not isinstance(products_df, pd.DataFrame) or products_df.empty:
         st.info("По активному листу пока нет данных для аналитики.")
@@ -8691,6 +8747,7 @@ def render_analytics_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataF
         tone="green",
     )
 
+    st.markdown('<div class="workspace-segment-wrap">', unsafe_allow_html=True)
     analytics_section = st.radio(
         "Раздел аналитики",
         ["Сегодня", "Цена и рынок", "Склад и спрос", "Качество", "Аккаунты / серии"],
@@ -8698,6 +8755,7 @@ def render_analytics_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataF
         horizontal=True,
         label_visibility="collapsed",
     )
+    st.markdown("<div class='workspace-mini-caption'>Открываем один аналитический экран за раз: так интерфейс чище, а тяжёлые таблицы не шумят на старте.</div></div>", unsafe_allow_html=True)
 
     if analytics_section == "Сегодня":
         if isinstance(tasks_df, pd.DataFrame) and not tasks_df.empty:
@@ -9156,17 +9214,10 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
     series_candidates = series_info.get("candidates", []) if isinstance(series_info, dict) else []
     if isinstance(base_sheet_df, pd.DataFrame) and normalize_text(submitted_query) and series_candidates:
         prefix_key = f"{tab_key}_{normalize_article(str(series_info.get('prefix', '')))}"
-        helper_col, actions_col = st.columns([2.5, 1.5])
-        helper_col.markdown(
-            f"<div class='series-inline-card'><div class='series-inline-title'>Серия {html.escape(str(series_info.get('prefix', '')))} · найдено {len(series_candidates)} поз.</div><div class='series-inline-sub'>Компактный helper: выбери группу и одним кликом добавь её в поиск, не раздувая главный экран.</div></div>",
+        st.markdown(
+            f"<div class='admin-soft-card'><div class='admin-soft-title'>Серия {html.escape(str(series_info.get('prefix', '')))} · {len(series_candidates)} позиций</div><div class='admin-soft-sub'>Вспомогательная панель. Держим её компактной: только быстрый выбор группы и добавление в поиск без второго большого экрана.</div></div>",
             unsafe_allow_html=True,
         )
-        select_all_clicked = actions_col.button("Выбрать всё", use_container_width=True, key=f"series_select_all_{prefix_key}")
-        clear_all_clicked = actions_col.button("Очистить", use_container_width=True, key=f"series_clear_all_{prefix_key}")
-        if select_all_clicked:
-            st.session_state[f"series_selected_{prefix_key}"] = [str(c["article_norm"]) for c in series_candidates]
-        if clear_all_clicked:
-            st.session_state[f"series_selected_{prefix_key}"] = []
         options = [str(c["article_norm"]) for c in sorted(series_candidates, key=series_sort_key)]
         format_map = {}
         for c in series_candidates:
@@ -9175,7 +9226,7 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
             format_map[norm] = label
         selected_norms = st.session_state.get(f"series_selected_{prefix_key}", [])
         add_clicked = False
-        with st.expander("Показать позиции серии", expanded=False):
+        with st.expander("Серия / группа по части артикула", expanded=False):
             selected_norms = st.multiselect(
                 "Серия",
                 options=options,
@@ -9186,7 +9237,14 @@ def render_sheet_workspace(sheet_name: str, tab_label: str, tab_key: str) -> Non
                 label_visibility="collapsed",
             )
             st.session_state[f"series_selected_{prefix_key}"] = selected_norms
-            add_clicked = st.button("Добавить отмеченные в поиск", use_container_width=True, key=f"series_add_{prefix_key}")
+            act1, act2, act3 = st.columns(3)
+            select_all_clicked = act1.button("Выбрать все", use_container_width=True, key=f"series_select_all_{prefix_key}")
+            clear_all_clicked = act2.button("Очистить", use_container_width=True, key=f"series_clear_all_{prefix_key}")
+            add_clicked = act3.button("Добавить в поиск", use_container_width=True, key=f"series_add_{prefix_key}")
+        if select_all_clicked:
+            st.session_state[f"series_selected_{prefix_key}"] = [str(c["article_norm"]) for c in series_candidates]
+        if clear_all_clicked:
+            st.session_state[f"series_selected_{prefix_key}"] = []
         if add_clicked and selected_norms:
             selected_articles = []
             selected_set = set(selected_norms)
@@ -9508,35 +9566,45 @@ else:
     apply_pending_catalog_navigation()
 
     task_counts = task_summary_counts()
-    st.radio(
-        "Режим",
-        options=["Каталог", "CRM workspace", "Аналитика"],
-        key="app_mode_main",
-        horizontal=True,
-    )
-    st.radio(
-        "Активный лист",
-        options=[label for _, label, _ in tab_specs],
-        key="active_workspace_label",
-        horizontal=True,
-    )
-    aux_l, aux_r = st.columns([1.2, 1.0])
-    aux_l.checkbox(
-        f"🔔 Задачи ({task_counts.get('open', 0)})",
-        key="show_task_center_global",
-        help="Открывает ленивый список задач и напоминаний по карточкам. Пока чекбокс выключен, список не строится.",
-    )
-    aux_r.checkbox(
-        "Показать фото",
-        key="show_photos_global",
-        help="Включает изображения в карточках поиска. Если отключить, интерфейс становится легче и работает быстрее.",
-    )
-
+    st.markdown("<div class='workspace-topbar-card'><div class='workspace-topbar-title'>Рабочий режим</div>", unsafe_allow_html=True)
+    ctl_l, ctl_r = st.columns([1.6, 1.2])
+    with ctl_l:
+        st.radio(
+            "Режим",
+            options=["Каталог", "CRM workspace", "Аналитика"],
+            key="app_mode_main",
+            horizontal=True,
+        )
+        st.radio(
+            "Активный лист",
+            options=[label for _, label, _ in tab_specs],
+            key="active_workspace_label",
+            horizontal=True,
+        )
+    with ctl_r:
+        aux_l, aux_r = st.columns(2)
+        aux_l.checkbox(
+            f"🔔 Задачи ({task_counts.get('open', 0)})",
+            key="show_task_center_global",
+            help="Открывает ленивый список задач и напоминаний по карточкам. Пока чекбокс выключен, список не строится.",
+        )
+        aux_r.checkbox(
+            "Показать фото",
+            key="show_photos_global",
+            help="Включает изображения в карточках поиска. Если отключить, интерфейс становится легче и работает быстрее.",
+        )
+        st.markdown(
+            f"<div class='workspace-mini-caption'><span class='compact-chip-note'>Всего строк: {sum(len(df) for df in sheets.values()) if isinstance(sheets, dict) else 0}</span>"
+            f"<span class='compact-chip-note'>Лист: {html.escape(st.session_state.get('active_workspace_label', 'Оригинал'))}</span>"
+            f"<span class='compact-chip-note'>Открытых задач: {task_counts.get('open', 0)}</span></div>",
+            unsafe_allow_html=True,
+        )
     active_sheet_name, active_tab_label, active_tab_key = label_to_spec[st.session_state.get("active_workspace_label", "Оригинал")]
     active_sheet_df = sheets.get(active_sheet_name) if isinstance(sheets, dict) else None
-    st.caption(
-        f"Каталог загружен: {sum(len(df) for df in sheets.values()) if isinstance(sheets, dict) else 0} строк • "
-        f"активный лист: {active_tab_label} • в активном листе: {len(active_sheet_df) if isinstance(active_sheet_df, pd.DataFrame) else 0} строк"
+    st.markdown(
+        f"<div class='workspace-topbar-meta'>Каталог загружен: {sum(len(df) for df in sheets.values()) if isinstance(sheets, dict) else 0} строк • "
+        f"активный лист: {html.escape(active_tab_label)} • в активном листе: {len(active_sheet_df) if isinstance(active_sheet_df, pd.DataFrame) else 0} строк</div></div>",
+        unsafe_allow_html=True,
     )
 
     if st.session_state.get("app_mode_main") == "CRM workspace":
