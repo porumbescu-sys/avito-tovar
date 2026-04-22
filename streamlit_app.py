@@ -31,7 +31,7 @@ import streamlit.components.v1 as components
 st.set_page_config(page_title="Мой Товар", page_icon="📦", layout="wide")
 
 APP_TITLE = "Мой Товар"
-APP_VERSION = "v54.8.0-crm-purchase-cost"
+APP_VERSION = "v54.9.0-crm-stats-velocity"
 
 
 SERVER_DATA_DIRNAME = "data"
@@ -775,16 +775,9 @@ def load_hot_watchlist_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
 
     def _read_excel_bytes(raw_bytes: bytes, ext: str) -> pd.DataFrame:
         bio = io.BytesIO(raw_bytes)
-
-        # xlsx/xlsm — читаем через openpyxl, чтобы не зависеть от auto-detect pandas
         if ext in {".xlsx", ".xlsm"} or raw_bytes[:2] == b"PK":
             bio.seek(0)
             return pd.read_excel(bio, engine="openpyxl")
-
-        # старый .xls на Streamlit Cloud без xlrd не читается.
-        # Пробуем 2 безопасных fallback:
-        # 1) openpyxl — если файл просто ошибочно назван .xls
-        # 2) html table — некоторые старые выгрузки Avito/Excel так сохраняются
         if ext == ".xls":
             try:
                 bio.seek(0)
@@ -798,11 +791,9 @@ def load_hot_watchlist_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
             except Exception:
                 pass
             raise ValueError(
-                "Watchlist в старом формате .xls. На сервере он не читается без xlrd. "
+                "Статистика/Watchlist в старом формате .xls. На сервере он не читается без xlrd. "
                 "Сохрани файл как .xlsx или .csv и загрузи снова."
             )
-
-        # Последняя попытка для файлов без нормального suffix
         try:
             bio.seek(0)
             return pd.read_excel(bio, engine="openpyxl")
@@ -814,7 +805,27 @@ def load_hot_watchlist_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
                 return html_tables[0]
         except Exception:
             pass
-        raise ValueError("Не удалось распознать формат watchlist-файла. Используй .xlsx или .csv.")
+        raise ValueError("Не удалось распознать формат файла статистики. Используй .xlsx или .csv.")
+
+    def _derive_velocity_band(month_value: float) -> str:
+        if month_value >= 30:
+            return "Очень быстро"
+        if month_value >= 10:
+            return "Быстро"
+        if month_value >= 3:
+            return "Стабильно"
+        if month_value > 0:
+            return "Медленно"
+        return "Нет продаж"
+
+    def _derive_abc_class(month_value: float) -> str:
+        if month_value >= 20:
+            return "A"
+        if month_value >= 5:
+            return "B"
+        if month_value > 0:
+            return "C"
+        return "D"
 
     if suffix == ".csv":
         raw = _read_csv_bytes(file_bytes)
@@ -828,48 +839,135 @@ def load_hot_watchlist_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
             "sales_qty_15m", "sales_per_month", "abc_class", "velocity_band",
             "best_supplier", "best_supplier_gap_pct", "buy_signal_30pct", "days_of_cover",
             "priority_score", "action_today", "watch_article_norm", "watch_key_norm",
-            "comparison_article_norm", "match_keys_text",
+            "comparison_article_norm", "match_keys_text", "stats_source_kind",
+            "sales_per_day", "sales_per_week", "sales_per_year", "deals_count",
+            "first_sale", "last_sale", "days_without_sales", "market_min_price",
+            "market_min_supplier", "supplier_presence_text",
         ])
+
     raw.columns = [normalize_text(c) for c in raw.columns]
     rows = []
-    for _, r in raw.iterrows():
-        watch_article = normalize_text(r.get("watch_article", ""))
-        watch_key = normalize_text(r.get("watch_key", ""))
-        watch_name = normalize_text(r.get("watch_name", ""))
-        comparison_article = normalize_text(r.get("comparison_article", ""))
-        keys = unique_preserve_order([
-            normalize_article(watch_article),
-            normalize_article(watch_key),
-            normalize_article(comparison_article),
-        ])
-        if not any(keys):
-            continue
-        rows.append({
-            "watch_article": watch_article,
-            "watch_key": watch_key,
-            "watch_name": watch_name,
-            "current_sheet": normalize_watchlist_sheet_name(r.get("current_sheet", "")),
-            "comparison_article": comparison_article,
-            "sales_qty_15m": safe_float(r.get("sales_qty_15m"), 0.0),
-            "sales_per_month": safe_float(r.get("sales_per_month"), 0.0),
-            "abc_class": normalize_text(r.get("abc_class", "")),
-            "velocity_band": normalize_text(r.get("velocity_band", "")),
-            "ledger_end_qty": safe_float(r.get("ledger_end_qty"), 0.0),
-            "our_price_now": safe_float(r.get("our_price_now"), 0.0),
-            "our_stock_now": safe_float(r.get("our_stock_now"), 0.0),
-            "best_supplier": normalize_text(r.get("best_supplier", "")),
-            "best_supplier_price_now": safe_float(r.get("best_supplier_price_now"), 0.0),
-            "best_supplier_stock_now": safe_float(r.get("best_supplier_stock_now"), 0.0),
-            "best_supplier_gap_pct": safe_float(r.get("best_supplier_gap_pct"), 0.0),
-            "buy_signal_30pct": normalize_text(r.get("buy_signal_30pct", "")),
-            "days_of_cover": safe_float(r.get("days_of_cover"), 0.0),
-            "priority_score": safe_float(r.get("priority_score"), 0.0),
-            "action_today": normalize_text(r.get("action_today", "")),
-            "watch_article_norm": normalize_article(watch_article),
-            "watch_key_norm": normalize_article(watch_key),
-            "comparison_article_norm": normalize_article(comparison_article),
-            "match_keys_text": "|".join([k for k in keys if k]),
-        })
+
+    is_velocity_format = {"Артикул", "Наименование", "В месяц"}.issubset(set(raw.columns))
+
+    if is_velocity_format:
+        for _, r in raw.iterrows():
+            watch_article = normalize_text(r.get("Артикул", ""))
+            watch_name = normalize_text(r.get("Наименование", ""))
+            comparison_article = watch_article
+            sales_per_month = safe_float(r.get("В месяц"), 0.0)
+            sales_per_day = safe_float(r.get("В день"), 0.0)
+            sales_per_week = safe_float(r.get("В неделю"), 0.0)
+            sales_per_year = safe_float(r.get("В год"), 0.0)
+            total_sold_qty = safe_float(r.get("Всего шт."), 0.0)
+            deals_count = safe_int(r.get("Сделок", 0), 0)
+            first_sale = normalize_text(r.get("Первая продажа", ""))
+            last_sale = normalize_text(r.get("Последняя продажа", ""))
+            days_without_sales = safe_float(r.get("Дней без продаж"), 0.0)
+            market_min_price = safe_float(r.get("Мин. цена конкурентов"), 0.0)
+            market_min_supplier = normalize_text(r.get("Поставщик (мин.)", ""))
+            supplier_presence_text = normalize_text(r.get("Наличие у поставщиков", ""))
+            our_price_now = safe_float(r.get("Наша цена"), 0.0)
+
+            keys = unique_preserve_order([
+                normalize_article(watch_article),
+                normalize_article(comparison_article),
+            ])
+            if not any(keys):
+                name_codes = build_row_compare_codes("", watch_name)
+                keys.extend([x for x in name_codes if x])
+            if not any(keys):
+                continue
+
+            priority_score = max(sales_per_month, 0.0) * 10.0 + max(deals_count, 0) * 0.2 - min(max(days_without_sales, 0.0), 180.0) * 0.1
+            rows.append({
+                "watch_article": watch_article,
+                "watch_key": watch_article,
+                "watch_name": watch_name,
+                "current_sheet": "",
+                "comparison_article": comparison_article,
+                "sales_qty_15m": total_sold_qty,
+                "sales_per_month": sales_per_month,
+                "abc_class": _derive_abc_class(sales_per_month),
+                "velocity_band": _derive_velocity_band(sales_per_month),
+                "ledger_end_qty": 0.0,
+                "our_price_now": our_price_now,
+                "our_stock_now": 0.0,
+                "best_supplier": market_min_supplier,
+                "best_supplier_price_now": market_min_price,
+                "best_supplier_stock_now": 0.0,
+                "best_supplier_gap_pct": 0.0,
+                "buy_signal_30pct": "",
+                "days_of_cover": 0.0,
+                "priority_score": round(priority_score, 2),
+                "action_today": "",
+                "watch_article_norm": normalize_article(watch_article),
+                "watch_key_norm": normalize_article(watch_article),
+                "comparison_article_norm": normalize_article(comparison_article),
+                "match_keys_text": "|".join([k for k in keys if k]),
+                "stats_source_kind": "velocity",
+                "sales_per_day": sales_per_day,
+                "sales_per_week": sales_per_week,
+                "sales_per_year": sales_per_year,
+                "deals_count": deals_count,
+                "first_sale": first_sale,
+                "last_sale": last_sale,
+                "days_without_sales": days_without_sales,
+                "market_min_price": market_min_price,
+                "market_min_supplier": market_min_supplier,
+                "supplier_presence_text": supplier_presence_text,
+            })
+    else:
+        for _, r in raw.iterrows():
+            watch_article = normalize_text(r.get("watch_article", ""))
+            watch_key = normalize_text(r.get("watch_key", ""))
+            watch_name = normalize_text(r.get("watch_name", ""))
+            comparison_article = normalize_text(r.get("comparison_article", ""))
+            keys = unique_preserve_order([
+                normalize_article(watch_article),
+                normalize_article(watch_key),
+                normalize_article(comparison_article),
+            ])
+            if not any(keys):
+                continue
+            rows.append({
+                "watch_article": watch_article,
+                "watch_key": watch_key,
+                "watch_name": watch_name,
+                "current_sheet": normalize_watchlist_sheet_name(r.get("current_sheet", "")),
+                "comparison_article": comparison_article,
+                "sales_qty_15m": safe_float(r.get("sales_qty_15m"), 0.0),
+                "sales_per_month": safe_float(r.get("sales_per_month"), 0.0),
+                "abc_class": normalize_text(r.get("abc_class", "")),
+                "velocity_band": normalize_text(r.get("velocity_band", "")),
+                "ledger_end_qty": safe_float(r.get("ledger_end_qty"), 0.0),
+                "our_price_now": safe_float(r.get("our_price_now"), 0.0),
+                "our_stock_now": safe_float(r.get("our_stock_now"), 0.0),
+                "best_supplier": normalize_text(r.get("best_supplier", "")),
+                "best_supplier_price_now": safe_float(r.get("best_supplier_price_now"), 0.0),
+                "best_supplier_stock_now": safe_float(r.get("best_supplier_stock_now"), 0.0),
+                "best_supplier_gap_pct": safe_float(r.get("best_supplier_gap_pct"), 0.0),
+                "buy_signal_30pct": normalize_text(r.get("buy_signal_30pct", "")),
+                "days_of_cover": safe_float(r.get("days_of_cover"), 0.0),
+                "priority_score": safe_float(r.get("priority_score"), 0.0),
+                "action_today": normalize_text(r.get("action_today", "")),
+                "watch_article_norm": normalize_article(watch_article),
+                "watch_key_norm": normalize_article(watch_key),
+                "comparison_article_norm": normalize_article(comparison_article),
+                "match_keys_text": "|".join([k for k in keys if k]),
+                "stats_source_kind": "legacy_watchlist",
+                "sales_per_day": safe_float(r.get("sales_per_day"), 0.0),
+                "sales_per_week": safe_float(r.get("sales_per_week"), 0.0),
+                "sales_per_year": safe_float(r.get("sales_per_year"), 0.0),
+                "deals_count": safe_int(r.get("deals_count", 0), 0),
+                "first_sale": normalize_text(r.get("first_sale", "")),
+                "last_sale": normalize_text(r.get("last_sale", "")),
+                "days_without_sales": safe_float(r.get("days_without_sales"), 0.0),
+                "market_min_price": safe_float(r.get("market_min_price"), 0.0),
+                "market_min_supplier": normalize_text(r.get("market_min_supplier", "")),
+                "supplier_presence_text": normalize_text(r.get("supplier_presence_text", "")),
+            })
+
     out = pd.DataFrame(rows)
     return out.reset_index(drop=True)
 
@@ -959,10 +1057,14 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
 def hot_watchlist_summary_text() -> str:
     hot_df = st.session_state.get("hot_items_df")
     if not isinstance(hot_df, pd.DataFrame) or hot_df.empty:
-        return "watchlist не загружен"
+        return "статистика ещё не загружена"
     buy_count = len(build_hot_buy_watchlist_table())
-    ab_count = int(hot_df.get("abc_class", pd.Series(dtype=object)).fillna("").map(normalize_text).isin(["A", "B"]).sum())
-    return f"Ходовых: {len(hot_df)} • сильный спрос: {ab_count} • можно брать: {buy_count}"
+    strong_count = int(pd.to_numeric(hot_df.get("sales_per_month", pd.Series(dtype=float)), errors="coerce").fillna(0.0).ge(2.0).sum())
+    source_kind = normalize_text(hot_df.get("stats_source_kind", pd.Series(dtype=object)).iloc[0] if "stats_source_kind" in hot_df.columns and not hot_df.empty else "")
+    if source_kind == "velocity":
+        return f"Строк статистики: {len(hot_df)} • сильный спрос: {strong_count} • можно брать: {buy_count}"
+    return f"Ходовых: {len(hot_df)} • сильный спрос: {strong_count} • можно брать: {buy_count}"
+
 
 def build_hot_buy_watchlist_table() -> pd.DataFrame:
     hot_df = st.session_state.get("hot_items_df")
@@ -4219,7 +4321,6 @@ def init_state() -> None:
         "app_mode_main": "Каталог",
         "crm_queue_filter": "Все",
         "crm_workspace_article_norm": "",
-        "crm_workspace_tab": "Дашборд",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -6003,15 +6104,15 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
-    render_sidebar_card_header("Ходовые позиции", "🔥", "Watchlist с продажами за период. Можно хранить на сервере и подсвечивать ходовые позиции прямо в результатах поиска.")
+    render_sidebar_card_header("Статистика продаж / ходовые", "🔥", "Новый файл статистики продаж. Берём продажи/мес из столбца «В месяц» и используем их в CRM, аналитике и решениях по складу.")
     hot_uploaded = st.file_uploader(
-        "Загрузить watchlist",
+        "Загрузить файл статистики",
         type=["xlsx", "xls", "csv"],
         key="hot_items_uploader",
         label_visibility="collapsed",
-        help="Файл с продажами за период и полями watchlist. Именно он включает подсказки «ходовая / можно брать / невыгодно» в карточках и отчётах.",
+        help="Можно загрузить новый файл статистики продаж или старый watchlist. Для нового файла продажи/мес берутся из столбца «В месяц».",
     )
-    st.caption("ⓘ Watchlist отвечает за спрос, дни запаса, приоритет и решение «можно брать / невыгодно» по ходовым позициям.")
+    st.caption("ⓘ Статистика продаж отвечает за продажи/мес, дни без продаж, спрос и приоритет. Для нового файла продажи/мес берутся из столбца «В месяц».")
     if hot_uploaded is not None:
         try:
             hot_bytes = hot_uploaded.getvalue()
@@ -6024,14 +6125,14 @@ with st.sidebar:
                 st.session_state.hot_items_name = hot_uploaded.name + " • сохранён в /data"
                 st.session_state.hot_items_last_sync_sig = hot_sig
                 st.session_state["hot_upload_applied_sig"] = hot_sig
-                log_operation(f"Обновлён watchlist ходовых: {hot_uploaded.name}", "success")
+                log_operation(f"Обновлён файл статистики/ходовых: {hot_uploaded.name}", "success")
         except Exception as exc:
             log_operation(f"Ошибка файла ходовых: {exc}", "warning")
-            st.error(f"Ошибка watchlist: {exc}")
+            st.error(f"Ошибка файла статистики: {exc}")
     else:
         if not isinstance(st.session_state.get("hot_items_df"), pd.DataFrame):
             load_persisted_watchlist_source_into_state()
-    st.markdown(f'<div class="sidebar-status">Watchlist: {html.escape(st.session_state.get("hot_items_name", "ещё не загружен"))}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sidebar-status">Статистика: {html.escape(st.session_state.get("hot_items_name", "ещё не загружена"))}</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="sidebar-mini">Файл на сервере: {html.escape(str(get_persisted_watchlist_file_path()))}</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="sidebar-mini">{html.escape(hot_watchlist_summary_text())}</div>', unsafe_allow_html=True)
     hot_df_state = st.session_state.get("hot_items_df")
@@ -7495,6 +7596,17 @@ def build_crm_workspace_products_df(
         hot_rec = pick_hot_watch_rec(row, hot_lookup) if hot_lookup else None
         sales_per_month = safe_float((hot_rec or {}).get("sales_per_month"), 0.0)
         sales_qty_15m = safe_float((hot_rec or {}).get("sales_qty_15m"), 0.0)
+        sales_per_day = safe_float((hot_rec or {}).get("sales_per_day"), 0.0)
+        sales_per_week = safe_float((hot_rec or {}).get("sales_per_week"), 0.0)
+        sales_per_year = safe_float((hot_rec or {}).get("sales_per_year"), 0.0)
+        deals_count = safe_int((hot_rec or {}).get("deals_count", 0), 0)
+        first_sale = normalize_text((hot_rec or {}).get("first_sale", ""))
+        last_sale = normalize_text((hot_rec or {}).get("last_sale", ""))
+        days_without_sales = safe_float((hot_rec or {}).get("days_without_sales"), 0.0)
+        market_min_price = safe_float((hot_rec or {}).get("market_min_price"), 0.0)
+        market_min_supplier = normalize_text((hot_rec or {}).get("market_min_supplier", ""))
+        supplier_presence_text = normalize_text((hot_rec or {}).get("supplier_presence_text", ""))
+        stats_source_kind = normalize_text((hot_rec or {}).get("stats_source_kind", ""))
         abc_class = normalize_text((hot_rec or {}).get("abc_class", "")).upper()
         velocity_band = normalize_text((hot_rec or {}).get("velocity_band", ""))
         days_of_cover = safe_float((hot_rec or {}).get("days_of_cover"), 0.0)
@@ -7681,6 +7793,17 @@ def build_crm_workspace_products_df(
             "transit_qty": transit_qty,
             "sales_per_month": round(sales_per_month, 2),
             "sales_qty_15m": round(sales_qty_15m, 2),
+            "sales_per_day": round(sales_per_day, 2) if sales_per_day > 0 else None,
+            "sales_per_week": round(sales_per_week, 2) if sales_per_week > 0 else None,
+            "sales_per_year": round(sales_per_year, 2) if sales_per_year > 0 else None,
+            "deals_count": deals_count if deals_count > 0 else None,
+            "first_sale": first_sale,
+            "last_sale": last_sale,
+            "days_without_sales": days_without_sales if days_without_sales > 0 else None,
+            "market_min_price": market_min_price if market_min_price > 0 else None,
+            "market_min_supplier": market_min_supplier,
+            "supplier_presence_text": supplier_presence_text,
+            "stats_source_kind": stats_source_kind,
             "abc_class": abc_class,
             "velocity_band": velocity_band,
             "stock_months": stock_months,
@@ -7848,10 +7971,6 @@ def apply_pending_catalog_navigation() -> None:
     if pending_label:
         st.session_state["active_workspace_label"] = pending_label
 
-    pending_crm_tab = normalize_text(st.session_state.pop("pending_crm_workspace_tab", ""))
-    if pending_crm_tab:
-        st.session_state["crm_workspace_tab"] = pending_crm_tab
-
     pending_article = normalize_text(st.session_state.pop("pending_catalog_article", ""))
     pending_tab_key = normalize_text(st.session_state.pop("pending_catalog_tab_key", "")) or "original"
     if pending_article:
@@ -7878,8 +7997,8 @@ def open_product_in_crm(article_norm: str, sheet_label: str = "", open_photo_edi
     resolved_label = CRM_SHEET_NAME_TO_LABEL.get(normalize_text(sheet_label), normalize_text(sheet_label) or "Оригинал")
     st.session_state["pending_app_mode_main"] = "CRM workspace"
     st.session_state["pending_active_workspace_label"] = resolved_label
-    st.session_state["pending_crm_workspace_tab"] = "Карточка"
     st.session_state["crm_workspace_article_norm"] = normalize_text(article_norm)
+    st.session_state["crm_card_section"] = "Обзор"
     if open_photo_editor:
         st.session_state["crm_workspace_open_photo_editor_for"] = normalize_text(article_norm)
     st.rerun()
@@ -8078,17 +8197,17 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
     if not isinstance(products_df, pd.DataFrame) or products_df.empty:
         st.info("Нет данных для CRM-карточки.")
         return
+
     selected_article_norm = normalize_text(st.session_state.get("crm_workspace_article_norm", ""))
+    labels, mapping = _crm_pick_label_to_row(products_df)
     if selected_article_norm and selected_article_norm in set(products_df["article_norm"].astype(str)):
-        current_row = products_df[products_df["article_norm"].astype(str) == selected_article_norm].iloc[0].to_dict()
-        labels, mapping = _crm_pick_label_to_row(products_df)
         default_label = next((label for label, row in mapping.items() if normalize_text(row.get("article_norm", "")) == selected_article_norm), labels[0])
         pick = st.selectbox("Позиция для CRM-карточки", labels, index=labels.index(default_label), key="crm_card_pick")
     else:
-        labels, mapping = _crm_pick_label_to_row(products_df)
         pick = st.selectbox("Позиция для CRM-карточки", labels, key="crm_card_pick")
     row = mapping[pick]
     remember_crm_article(normalize_text(row.get("article_norm", "")))
+
     st.markdown("### CRM-карточка товара")
     top1, top2 = st.columns([1.25, 1.75])
     with top1:
@@ -8112,10 +8231,20 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         st.write(f"**Склад:** {normalize_text(row.get('stock_action', '')) or 'Проверить вручную'}")
         st.write(f"**Цена:** {normalize_text(row.get('price_action', '')) or 'Оставить цену'}")
         st.write(f"**Размещение:** {normalize_text(row.get('placement_action', '')) or 'Ничего'}")
-        st.write(f"**Рынок:** {('ниже нас на ' + str(round(safe_float(row.get('market_gap_pct', 0.0), 0.0), 1)) + '%') if safe_float(row.get('market_gap_pct', 0.0), 0.0) > 0 else 'нет сигнала рынка'}")
+        st.write(f"**Рынок:** {( 'ниже нас на ' + str(round(safe_float(row.get('market_gap_pct', 0.0), 0.0), 1)) + '%' ) if safe_float(row.get('market_gap_pct', 0.0), 0.0) > 0 else 'нет сигнала рынка'}")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Обзор", "Характеристики", "Поставщики", "Задачи"])
-    with tab1:
+    force_open_photo_editor_for = normalize_text(st.session_state.pop("crm_workspace_open_photo_editor_for", ""))
+    if force_open_photo_editor_for == normalize_text(row.get("article_norm", "")):
+        st.session_state["crm_card_section"] = "Обзор"
+    card_section = st.radio(
+        "Раздел карточки",
+        ["Обзор", "Характеристики", "Поставщики", "Статистика", "Задачи"],
+        horizontal=True,
+        key="crm_card_section",
+        label_visibility="collapsed",
+    )
+
+    if card_section == "Обзор":
         left, right = st.columns(2)
         left.write(f"**Лист:** {normalize_text(row.get('sheet_label', '')) or sheet_label}")
         left.write(f"**Фото:** {'Да' if bool(row.get('has_photo')) else 'Нет'}")
@@ -8171,56 +8300,39 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         art_norm = normalize_text(row.get("article_norm", ""))
         current_photo_url = normalize_text(row.get("photo_url", ""))
         current_note = normalize_text(row.get("manual_note", ""))
-        force_open_photo_editor_for = normalize_text(st.session_state.pop("crm_workspace_open_photo_editor_for", ""))
         photo_editor_expanded = (not bool(row.get('has_photo'))) or (force_open_photo_editor_for == art_norm)
         if force_open_photo_editor_for == art_norm:
             st.caption("Режим быстрого добавления фото открыт для этой позиции.")
 
         with st.expander("Фото и заметка по карточке", expanded=photo_editor_expanded):
             with st.form(f"crm_workspace_card_override_{art_norm}"):
-                photo_url_new = st.text_input(
-                    "Фото (ссылка)",
-                    value=current_photo_url,
-                    key=f"crm_workspace_card_photo_{art_norm}",
-                    placeholder="Вставь прямую ссылку на фото товара",
-                )
-                note_new = st.text_area(
-                    "Заметка",
-                    value=current_note,
-                    height=90,
-                    key=f"crm_workspace_card_note_{art_norm}",
-                    placeholder="Короткий комментарий по товару: что исправили, что проверить, что важно.",
-                )
+                photo_url_new = st.text_input("Фото (ссылка)", value=current_photo_url, key=f"crm_workspace_card_photo_{art_norm}", placeholder="Вставь прямую ссылку на фото товара")
+                note_new = st.text_area("Заметка", value=current_note, height=90, key=f"crm_workspace_card_note_{art_norm}", placeholder="Короткий комментарий по товару: что исправили, что проверить, что важно.")
                 s1, s2 = st.columns(2)
                 save_clicked = s1.form_submit_button("Сохранить карточку", use_container_width=True, type="primary")
                 reset_clicked = s2.form_submit_button("Сбросить ручные правки", use_container_width=True)
 
             if save_clicked:
-                save_card_override(
-                    sheet_name,
-                    art,
-                    art_norm,
-                    {
-                        "photo_url": photo_url_new,
-                        "name_override": normalize_text(row.get("name", "")),
-                        "meta_brand": normalize_text(row.get("meta_brand", "")),
-                        "meta_model": normalize_text(row.get("meta_model", "")),
-                        "meta_manufacturer_code": normalize_text(row.get("meta_manufacturer_code", "")),
-                        "meta_print_type": normalize_text(row.get("meta_print_type", "")),
-                        "meta_color": normalize_text(row.get("meta_color", "")),
-                        "meta_capacity": normalize_text(row.get("meta_capacity", "")),
-                        "meta_iso_pages": normalize_text(row.get("meta_iso_pages", "")),
-                        "meta_item_type": normalize_text(row.get("meta_item_type", "")),
-                        "meta_print_technology": normalize_text(row.get("meta_print_technology", "")),
-                        "meta_description": normalize_text(row.get("meta_description", "")),
-                        "meta_fits_models": normalize_text(row.get("meta_fits_models", "")),
-                        "meta_weight": normalize_text(row.get("meta_weight", "")),
-                        "meta_length": normalize_text(row.get("meta_length", "")),
-                        "meta_width": normalize_text(row.get("meta_width", "")),
-                        "meta_height": normalize_text(row.get("meta_height", "")),
-                        "note": note_new,
-                    },
-                )
+                save_card_override(sheet_name, art, art_norm, {
+                    "photo_url": photo_url_new,
+                    "name_override": normalize_text(row.get("name", "")),
+                    "meta_brand": normalize_text(row.get("meta_brand", "")),
+                    "meta_model": normalize_text(row.get("meta_model", "")),
+                    "meta_manufacturer_code": normalize_text(row.get("meta_manufacturer_code", "")),
+                    "meta_print_type": normalize_text(row.get("meta_print_type", "")),
+                    "meta_color": normalize_text(row.get("meta_color", "")),
+                    "meta_capacity": normalize_text(row.get("meta_capacity", "")),
+                    "meta_iso_pages": normalize_text(row.get("meta_iso_pages", "")),
+                    "meta_item_type": normalize_text(row.get("meta_item_type", "")),
+                    "meta_print_technology": normalize_text(row.get("meta_print_technology", "")),
+                    "meta_description": normalize_text(row.get("meta_description", "")),
+                    "meta_fits_models": normalize_text(row.get("meta_fits_models", "")),
+                    "meta_weight": normalize_text(row.get("meta_weight", "")),
+                    "meta_length": normalize_text(row.get("meta_length", "")),
+                    "meta_width": normalize_text(row.get("meta_width", "")),
+                    "meta_height": normalize_text(row.get("meta_height", "")),
+                    "note": note_new,
+                })
                 st.success(f"Карточка {art} сохранена.")
                 st.rerun()
 
@@ -8231,7 +8343,8 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
 
         if st.button("Открыть в каталоге", use_container_width=True, key="crm_card_open_catalog"):
             open_product_in_catalog(normalize_text(row.get("article", "")), normalize_text(row.get("sheet_label", sheet_label)))
-    with tab2:
+
+    elif card_section == "Характеристики":
         ch1, ch2 = st.columns(2)
         ch1.write(f"**Бренд:** {normalize_text(row.get('meta_brand', '')) or '—'}")
         ch1.write(f"**Модель:** {normalize_text(row.get('meta_model', '')) or '—'}")
@@ -8247,20 +8360,18 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         st.write(f"**Подходит к моделям:** {normalize_text(row.get('meta_fits_models', '')) or '—'}")
         st.write(f"**Описание:** {normalize_text(row.get('meta_description', '')) or '—'}")
         st.write(f"**Источник закупки:** {normalize_text(row.get('purchase_source_sheet', '')) or '—'}")
-    with tab3:
+
+    elif card_section == "Поставщики":
         valid_offers = row.get("supplier_valid_offers", []) if isinstance(row.get("supplier_valid_offers", []), list) else []
         debug_rows = row.get("supplier_debug_rows", []) if isinstance(row.get("supplier_debug_rows", []), list) else []
 
         if valid_offers:
-            offers_df = pd.DataFrame([
-                {
-                    "Поставщик": normalize_text(x.get("source", "")),
-                    "Цена": safe_float(x.get("price"), 0.0),
-                    "Остаток": safe_float(x.get("qty"), 0.0),
-                    "Статус": normalize_text(x.get("status", "")) or "OK",
-                }
-                for x in valid_offers
-            ])
+            offers_df = pd.DataFrame([{
+                "Поставщик": normalize_text(x.get("source", "")),
+                "Цена": safe_float(x.get("price"), 0.0),
+                "Остаток": safe_float(x.get("qty"), 0.0),
+                "Статус": normalize_text(x.get("status", "")) or "OK",
+            } for x in valid_offers])
             cheaper_offers_df = offers_df[offers_df["Цена"].fillna(0).astype(float) < safe_float(row.get("sale_price"), 0.0)].copy()
             if not cheaper_offers_df.empty:
                 st.success(f"Найдено предложений поставщиков дешевле нашей цены: {len(cheaper_offers_df)}")
@@ -8275,7 +8386,59 @@ def render_crm_workspace_card(products_df: pd.DataFrame, sheet_name: str, sheet_
         if debug_rows:
             with st.expander("Диагностика офферов", expanded=not bool(valid_offers)):
                 st.dataframe(pd.DataFrame(debug_rows), use_container_width=True, hide_index=True, height=320)
-    with tab4:
+
+    elif card_section == "Статистика":
+        if safe_float(row.get("sales_per_month", 0.0), 0.0) <= 0 and safe_float(row.get("sales_qty_15m", 0.0), 0.0) <= 0:
+            st.info("Статистика по этой позиции не загружена или не сматчилась по артикулу/коду.")
+        else:
+            src_kind = normalize_text(row.get("stats_source_kind", ""))
+            if src_kind == "velocity":
+                st.caption("Статистика загружена из нового файла скорости продаж. Продажи/мес берутся из столбца «В месяц».")
+            else:
+                st.caption("Статистика загружена из watchlist/файла продаж.")
+
+            s1, s2, s3, s4 = st.columns(4)
+            s1.metric("В день", fmt_qty(row.get("sales_per_day", None)) if row.get("sales_per_day", None) not in (None, "") else "—")
+            s2.metric("В неделю", fmt_qty(row.get("sales_per_week", None)) if row.get("sales_per_week", None) not in (None, "") else "—")
+            s3.metric("В месяц", fmt_qty(row.get("sales_per_month", 0.0)) if safe_float(row.get("sales_per_month", 0.0), 0.0) > 0 else "—")
+            s4.metric("В год", fmt_qty(row.get("sales_per_year", None)) if row.get("sales_per_year", None) not in (None, "") else "—")
+
+            s5, s6, s7, s8 = st.columns(4)
+            s5.metric("Всего шт.", fmt_qty(row.get("sales_qty_15m", 0.0)) if safe_float(row.get("sales_qty_15m", 0.0), 0.0) > 0 else "—")
+            s6.metric("Сделок", safe_int(row.get("deals_count", 0), 0) if safe_int(row.get("deals_count", 0), 0) > 0 else "—")
+            s7.metric("Дней без продаж", safe_int(row.get("days_without_sales", 0), 0) if safe_float(row.get("days_without_sales", 0.0), 0.0) > 0 else "—")
+            s8.metric("Запас, мес", fmt_qty(row.get("stock_months", "")) if row.get("stock_months", None) not in (None, "") else "—")
+
+            d1, d2 = st.columns(2)
+            d1.write(f"**Первая продажа:** {normalize_text(row.get('first_sale', '')) or '—'}")
+            d1.write(f"**Последняя продажа:** {normalize_text(row.get('last_sale', '')) or '—'}")
+            d1.write(f"**ABC класс:** {normalize_text(row.get('abc_class', '')) or '—'}")
+            d1.write(f"**Скорость:** {normalize_text(row.get('velocity_band', '')) or '—'}")
+            d2.write(f"**Источник статистики:** {normalize_text(row.get('stats_source_kind', '')) or '—'}")
+            d2.write(f"**Поставщик (мин.):** {normalize_text(row.get('market_min_supplier', '')) or '—'}")
+            d2.write(f"**Мин. цена конкурентов:** {fmt_price(row.get('market_min_price', 0.0)) if safe_float(row.get('market_min_price'), 0.0) > 0 else '—'}")
+            d2.write(f"**Наличие у поставщиков:** {normalize_text(row.get('supplier_presence_text', '')) or '—'}")
+
+            stat_df = pd.DataFrame([{
+                "Артикул": normalize_text(row.get("article", "")),
+                "Наименование": normalize_text(row.get("name", "")),
+                "В день": row.get("sales_per_day", None),
+                "В неделю": row.get("sales_per_week", None),
+                "В месяц": row.get("sales_per_month", None),
+                "В год": row.get("sales_per_year", None),
+                "Всего шт.": row.get("sales_qty_15m", None),
+                "Сделок": row.get("deals_count", None),
+                "Первая продажа": normalize_text(row.get("first_sale", "")),
+                "Последняя продажа": normalize_text(row.get("last_sale", "")),
+                "Дней без продаж": row.get("days_without_sales", None),
+                "Мин. цена конкурентов": row.get("market_min_price", None),
+                "Поставщик (мин.)": normalize_text(row.get("market_min_supplier", "")),
+                "Наличие у поставщиков": normalize_text(row.get("supplier_presence_text", "")),
+            }])
+            with st.expander("Показать строку статистики", expanded=False):
+                st.dataframe(stat_df, use_container_width=True, hide_index=True)
+
+    elif card_section == "Задачи":
         task_df = build_task_view_df(sheet_filter=sheet_name)
         if isinstance(task_df, pd.DataFrame) and not task_df.empty:
             task_df = task_df[task_df["Артикул"].fillna("").astype(str).eq(normalize_text(row.get("article", "")))].copy()
@@ -8315,25 +8478,16 @@ def render_crm_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataFrame |
         st.info("По активному листу пока нет данных для CRM workspace.")
         st.markdown('</div>', unsafe_allow_html=True)
         return
-
-    crm_sections = ["Дашборд", "Очереди", "Исполнение", "Pipeline", "Карточка"]
-    current_section = st.radio(
-        "Раздел CRM",
-        options=crm_sections,
-        key="crm_workspace_tab",
-        horizontal=True,
-        label_visibility="collapsed",
-    )
-
-    if current_section == "Дашборд":
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Дашборд", "Очереди", "Исполнение", "Pipeline", "Карточка"])
+    with tab1:
         render_crm_workspace_dashboard(products_df, tasks_df)
-    elif current_section == "Очереди":
+    with tab2:
         render_crm_workspace_queues(products_df)
-    elif current_section == "Исполнение":
+    with tab3:
         render_crm_workspace_execution(products_df)
-    elif current_section == "Pipeline":
+    with tab4:
         render_crm_workspace_pipeline(products_df)
-    else:
+    with tab5:
         render_crm_workspace_card(products_df, sheet_name, sheet_label)
     st.markdown('</div>', unsafe_allow_html=True)
 
