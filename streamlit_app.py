@@ -8685,7 +8685,7 @@ def render_analytics_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataF
             st.markdown("#### Ходовые позиции")
             st.dataframe(hot_view[[c for c in ["Артикул", "Товар", "Продажи, шт/мес", "Запас, мес", "Лучший поставщик", "Цена поставщика", "Разница, %", "Решение"] if c in hot_view.columns]], use_container_width=True, hide_index=True, height=380)
 
-    with tab2:
+    if analytics_section == "Цена и рынок":
         if isinstance(top_df, pd.DataFrame) and not top_df.empty:
             st.markdown("#### Приоритет на пересмотр цены")
             st.dataframe(top_df[[c for c in ["Артикул", "Название", "Продажи, шт/мес", "Наш запас, мес", "Наша цена", "Лучшая цена дистрибьютора", "Рекомендую, руб", "Лучший поставщик", "Разница, руб", "Разница, %"] if c in top_df.columns]].head(150), use_container_width=True, hide_index=True, height=460)
@@ -8698,7 +8698,7 @@ def render_analytics_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataF
             st.markdown("#### Последние ручные правки цены")
             st.dataframe(patch_history_df[[c for c in ["changed_at", "article", "sheet_name", "old_price", "new_price", "change_source", "note"] if c in patch_history_df.columns]].head(40), use_container_width=True, hide_index=True, height=320)
 
-    with tab3:
+    if analytics_section == "Склад и спрос":
         low_stock_df = decision_df[decision_df["Низкий запас"] == "Да"].copy()
         dead_stock_df = decision_df[decision_df["Залежался"] == "Да"].copy()
         overstock_df = decision_df[decision_df["Избыточный запас"] == "Да"].copy()
@@ -8715,7 +8715,7 @@ def render_analytics_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataF
         elif low_stock_df.empty:
             st.info("По текущему листу нет явных проблем по запасу.")
 
-    with tab4:
+    if analytics_section == "Качество":
         if isinstance(quality_df, pd.DataFrame) and not quality_df.empty:
             st.markdown("#### Покрытие качества карточек")
             st.dataframe(quality_df, use_container_width=True, hide_index=True)
@@ -8733,7 +8733,7 @@ def render_analytics_workspace(sheet_df: pd.DataFrame | None, photo_df: pd.DataF
             st.markdown("#### Позиции без Avito")
             st.dataframe(no_avito_df[[c for c in ["Артикул", "Товар", "Наш остаток", "Есть фото", "Готов к размещению", "Решение"] if c in no_avito_df.columns]].head(120), use_container_width=True, hide_index=True, height=320)
 
-    with tab5:
+    if analytics_section == "Аккаунты / серии":
         if isinstance(account_df, pd.DataFrame) and not account_df.empty:
             st.markdown("#### Аналитика по аккаунтам Avito")
             st.dataframe(account_df, use_container_width=True, hide_index=True)
